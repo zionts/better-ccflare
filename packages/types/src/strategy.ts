@@ -1,7 +1,7 @@
 import type { Account } from "./account";
 
 export enum StrategyName {
-	Session = "session",
+  Session = "session",
 }
 
 /**
@@ -9,34 +9,40 @@ export enum StrategyName {
  * Allows strategies to interact with the database without direct SQL access
  */
 export interface StrategyStore {
-	/**
-	 * Reset session for an account
-	 * Updates session_start and session_request_count
-	 */
-	resetAccountSession(accountId: string, timestamp: number): void;
+  /**
+   * Reset session for an account
+   * Updates session_start and session_request_count
+   */
+  resetAccountSession(accountId: string, timestamp: number): void;
 
-	/**
-	 * Get all accounts (optional method for strategies that need full account list)
-	 */
-	getAllAccounts?(): Account[] | Promise<Account[]>;
+  /**
+   * Get all accounts (optional method for strategies that need full account list)
+   */
+  getAllAccounts?(): Account[] | Promise<Account[]>;
 
-	/**
-	 * Update account request count
-	 */
-	updateAccountRequestCount?(accountId: string, count: number): void;
+  /**
+   * Update account request count
+   */
+  updateAccountRequestCount?(accountId: string, count: number): void;
 
-	/**
-	 * Get account by ID
-	 */
-	getAccount?(accountId: string): Account | null | Promise<Account | null>;
+  /**
+   * Get account by ID
+   */
+  getAccount?(accountId: string): Account | null | Promise<Account | null>;
 
-	/**
-	 * Pause an account
-	 */
-	pauseAccount?(accountId: string): void;
+  /**
+   * Pause an account
+   */
+  pauseAccount?(accountId: string): void;
 
-	/**
-	 * Resume a paused account
-	 */
-	resumeAccount?(accountId: string): void;
+  /**
+   * Resume a paused account
+   */
+  resumeAccount?(accountId: string): void;
+
+  /**
+   * Get utilization percentage for an account (0-100, lower = more capacity).
+   * Returns null if utilization data is unavailable.
+   */
+  getAccountUtilization?(accountId: string): number | null;
 }

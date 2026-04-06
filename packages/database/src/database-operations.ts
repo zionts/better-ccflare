@@ -13,130 +13,130 @@ import { AgentPreferenceRepository } from "./repositories/agent-preference.repos
 import { ApiKeyRepository } from "./repositories/api-key.repository";
 import { OAuthRepository } from "./repositories/oauth.repository";
 import {
-	type RequestData,
-	RequestRepository,
+  type RequestData,
+  RequestRepository,
 } from "./repositories/request.repository";
 import { StatsRepository } from "./repositories/stats.repository";
 import { StrategyRepository } from "./repositories/strategy.repository";
 import { withDatabaseRetry } from "./retry";
 
 export interface DatabaseConfig {
-	/** Enable WAL (Write-Ahead Logging) mode for better concurrency */
-	walMode?: boolean;
-	/** SQLite busy timeout in milliseconds */
-	busyTimeoutMs?: number;
-	/** Cache size in pages (negative value = KB) */
-	cacheSize?: number;
-	/** Synchronous mode: OFF, NORMAL, FULL */
-	synchronous?: "OFF" | "NORMAL" | "FULL";
-	/** Memory-mapped I/O size in bytes */
-	mmapSize?: number;
-	/** Retry configuration for database operations */
-	retry?: DatabaseRetryConfig;
-	/** Page size in bytes - default 2048 (2KB), recommend 4096 (4KB) for better memory efficiency */
-	pageSize?: number;
+  /** Enable WAL (Write-Ahead Logging) mode for better concurrency */
+  walMode?: boolean;
+  /** SQLite busy timeout in milliseconds */
+  busyTimeoutMs?: number;
+  /** Cache size in pages (negative value = KB) */
+  cacheSize?: number;
+  /** Synchronous mode: OFF, NORMAL, FULL */
+  synchronous?: "OFF" | "NORMAL" | "FULL";
+  /** Memory-mapped I/O size in bytes */
+  mmapSize?: number;
+  /** Retry configuration for database operations */
+  retry?: DatabaseRetryConfig;
+  /** Page size in bytes - default 2048 (2KB), recommend 4096 (4KB) for better memory efficiency */
+  pageSize?: number;
 }
 
 export interface DatabaseRetryConfig {
-	/** Maximum number of retry attempts for database operations */
-	attempts?: number;
-	/** Initial delay between retries in milliseconds */
-	delayMs?: number;
-	/** Backoff multiplier for exponential backoff */
-	backoff?: number;
-	/** Maximum delay between retries in milliseconds */
-	maxDelayMs?: number;
+  /** Maximum number of retry attempts for database operations */
+  attempts?: number;
+  /** Initial delay between retries in milliseconds */
+  delayMs?: number;
+  /** Backoff multiplier for exponential backoff */
+  backoff?: number;
+  /** Maximum delay between retries in milliseconds */
+  maxDelayMs?: number;
 }
 
 /**
  * Apply SQLite pragmas for optimal performance on distributed filesystems
  */
 function configureSqlite(
-	db: Database,
-	config: DatabaseConfig,
-	skipIntegrityCheck = false,
+  db: Database,
+  config: DatabaseConfig,
+  skipIntegrityCheck = false,
 ): void {
-	try {
-		// Check database integrity first (skip in fast mode for CLI commands)
-		if (!skipIntegrityCheck) {
-			const integrityResult = db.query("PRAGMA integrity_check").get() as {
-				integrity_check: string;
-			};
-			if (integrityResult.integrity_check !== "ok") {
-				console.error("\n❌ DATABASE INTEGRITY CHECK FAILED");
-				console.error("═".repeat(50));
-				console.error(`Error: ${integrityResult.integrity_check}\n`);
-				console.error("Your database may be corrupted. To repair it, run:");
-				console.error("  bun run cli --repair-db\n");
-				console.error(`${"═".repeat(50)}\n`);
-				throw new Error(
-					`Database integrity check failed: ${integrityResult.integrity_check}`,
-				);
-			}
-		}
+  try {
+    // Check database integrity first (skip in fast mode for CLI commands)
+    if (!skipIntegrityCheck) {
+      const integrityResult = db.query("PRAGMA integrity_check").get() as {
+        integrity_check: string;
+      };
+      if (integrityResult.integrity_check !== "ok") {
+        console.error("\n❌ DATABASE INTEGRITY CHECK FAILED");
+        console.error("═".repeat(50));
+        console.error(`Error: ${integrityResult.integrity_check}\n`);
+        console.error("Your database may be corrupted. To repair it, run:");
+        console.error("  bun run cli --repair-db\n");
+        console.error(`${"═".repeat(50)}\n`);
+        throw new Error(
+          `Database integrity check failed: ${integrityResult.integrity_check}`,
+        );
+      }
+    }
 
-		// Enable WAL mode for better concurrency (with error handling)
-		if (config.walMode !== false) {
-			try {
-				const result = db.query("PRAGMA journal_mode = WAL").get() as {
-					journal_mode: string;
-				};
-				if (result.journal_mode !== "wal") {
-					console.warn(
-						"Failed to enable WAL mode, falling back to DELETE mode",
-					);
-					db.run("PRAGMA journal_mode = DELETE");
-				}
-			} catch (error) {
-				console.warn("WAL mode failed, using DELETE mode:", error);
-				db.run("PRAGMA journal_mode = DELETE");
-			}
-		}
+    // Enable WAL mode for better concurrency (with error handling)
+    if (config.walMode !== false) {
+      try {
+        const result = db.query("PRAGMA journal_mode = WAL").get() as {
+          journal_mode: string;
+        };
+        if (result.journal_mode !== "wal") {
+          console.warn(
+            "Failed to enable WAL mode, falling back to DELETE mode",
+          );
+          db.run("PRAGMA journal_mode = DELETE");
+        }
+      } catch (error) {
+        console.warn("WAL mode failed, using DELETE mode:", error);
+        db.run("PRAGMA journal_mode = DELETE");
+      }
+    }
 
-		// Set busy timeout for lock handling
-		if (config.busyTimeoutMs !== undefined) {
-			db.run(`PRAGMA busy_timeout = ${config.busyTimeoutMs}`);
-		}
+    // Set busy timeout for lock handling
+    if (config.busyTimeoutMs !== undefined) {
+      db.run(`PRAGMA busy_timeout = ${config.busyTimeoutMs}`);
+    }
 
-		// Configure cache size
-		if (config.cacheSize !== undefined) {
-			db.run(`PRAGMA cache_size = ${config.cacheSize}`);
-		}
+    // Configure cache size
+    if (config.cacheSize !== undefined) {
+      db.run(`PRAGMA cache_size = ${config.cacheSize}`);
+    }
 
-		// Set synchronous mode (more conservative for distributed filesystems)
-		const syncMode = config.synchronous || "FULL"; // Default to FULL for safety
-		db.run(`PRAGMA synchronous = ${syncMode}`);
+    // Set synchronous mode (more conservative for distributed filesystems)
+    const syncMode = config.synchronous || "FULL"; // Default to FULL for safety
+    db.run(`PRAGMA synchronous = ${syncMode}`);
 
-		// Configure memory-mapped I/O (disable on distributed filesystems if problematic)
-		if (config.mmapSize !== undefined && config.mmapSize > 0) {
-			try {
-				db.run(`PRAGMA mmap_size = ${config.mmapSize}`);
-			} catch (error) {
-				console.warn("Failed to set mmap_size:", error);
-			}
-		}
+    // Configure memory-mapped I/O (disable on distributed filesystems if problematic)
+    if (config.mmapSize !== undefined && config.mmapSize > 0) {
+      try {
+        db.run(`PRAGMA mmap_size = ${config.mmapSize}`);
+      } catch (error) {
+        console.warn("Failed to set mmap_size:", error);
+      }
+    }
 
-		// Set page size (only effective before any data is written, or after VACUUM)
-		if (config.pageSize !== undefined) {
-			const currentPageSize = (
-				db.query("PRAGMA page_size").get() as { page_size: number }
-			).page_size;
-			if (currentPageSize !== config.pageSize) {
-				db.run(`PRAGMA page_size = ${config.pageSize}`);
-			}
-		}
+    // Set page size (only effective before any data is written, or after VACUUM)
+    if (config.pageSize !== undefined) {
+      const currentPageSize = (
+        db.query("PRAGMA page_size").get() as { page_size: number }
+      ).page_size;
+      if (currentPageSize !== config.pageSize) {
+        db.run(`PRAGMA page_size = ${config.pageSize}`);
+      }
+    }
 
-		// Additional optimizations for distributed filesystems
-		db.run("PRAGMA temp_store = MEMORY");
-		db.run("PRAGMA foreign_keys = ON");
+    // Additional optimizations for distributed filesystems
+    db.run("PRAGMA temp_store = MEMORY");
+    db.run("PRAGMA foreign_keys = ON");
 
-		// Add checkpoint interval for WAL mode (100 pages = ~200KB with 2KB pages)
-		// Lower threshold reduces WAL file size at the cost of slightly more frequent checkpoints
-		db.run("PRAGMA wal_autocheckpoint = 100");
-	} catch (error) {
-		console.error("Database configuration failed:", error);
-		throw new Error(`Failed to configure SQLite database: ${error}`);
-	}
+    // Add checkpoint interval for WAL mode (100 pages = ~200KB with 2KB pages)
+    // Lower threshold reduces WAL file size at the cost of slightly more frequent checkpoints
+    db.run("PRAGMA wal_autocheckpoint = 100");
+  } catch (error) {
+    console.error("Database configuration failed:", error);
+    throw new Error(`Failed to configure SQLite database: ${error}`);
+  }
 }
 
 /**
@@ -147,789 +147,801 @@ function configureSqlite(
  * All public methods are async to support both backends.
  */
 export class DatabaseOperations implements StrategyStore, Disposable {
-	private adapter: BunSqlAdapter;
-	/** Raw bun:sqlite Database — only set in SQLite mode */
-	private sqliteDb?: Database;
-	private runtime?: RuntimeConfig;
-	private dbConfig: DatabaseConfig;
-	private retryConfig: DatabaseRetryConfig;
-	private fastMode: boolean;
-	readonly isSQLite: boolean;
-
-	// Repositories
-	private accounts: AccountRepository;
-	private requests: RequestRepository;
-	private oauth: OAuthRepository;
-	private strategy: StrategyRepository;
-	private stats: StatsRepository;
-	private agentPreferences: AgentPreferenceRepository;
-	private apiKeys: ApiKeyRepository;
-
-	constructor(
-		dbPath?: string,
-		dbConfig?: DatabaseConfig,
-		retryConfig?: DatabaseRetryConfig,
-		fastMode = false,
-	) {
-		this.fastMode = fastMode;
-
-		// Default database configuration optimized for distributed filesystems
-		this.dbConfig = {
-			walMode: true,
-			busyTimeoutMs: 10000,
-			cacheSize: -5000,
-			synchronous: "FULL",
-			mmapSize: 0,
-			pageSize: 2048,
-			...dbConfig,
-		};
-
-		// Default retry configuration for database operations
-		this.retryConfig = {
-			attempts: 3,
-			delayMs: 100,
-			backoff: 2,
-			maxDelayMs: 5000,
-			...retryConfig,
-		};
-
-		// Detect PostgreSQL mode from DATABASE_URL
-		const databaseUrl = process.env.DATABASE_URL;
-		const isPostgres =
-			databaseUrl &&
-			(databaseUrl.startsWith("postgres://") ||
-				databaseUrl.startsWith("postgresql://"));
-
-		if (isPostgres) {
-			this.isSQLite = false;
-			// Import SQL lazily to avoid issues when not needed
-			const { SQL } = require("bun");
-			const sqlClient = new SQL({
-				url: databaseUrl,
-				max: 10,
-				idleTimeout: 30,
-			});
-			this.adapter = new BunSqlAdapter(sqlClient, false);
-		} else {
-			this.isSQLite = true;
-			const resolvedPath = dbPath ?? resolveDbPath();
-
-			// Ensure the directory exists
-			const dir = dirname(resolvedPath);
-			mkdirSync(dir, { recursive: true });
-
-			this.sqliteDb = new Database(resolvedPath, { create: true });
-
-			// Apply SQLite configuration
-			configureSqlite(this.sqliteDb, this.dbConfig, fastMode);
-
-			ensureSchema(this.sqliteDb);
-			runMigrations(this.sqliteDb, resolvedPath);
-
-			this.adapter = new BunSqlAdapter(this.sqliteDb);
-		}
-
-		// Initialize repositories
-		this.accounts = new AccountRepository(this.adapter);
-		this.requests = new RequestRepository(this.adapter);
-		this.oauth = new OAuthRepository(this.adapter);
-		this.strategy = new StrategyRepository(this.adapter);
-		this.stats = new StatsRepository(this.adapter);
-		this.agentPreferences = new AgentPreferenceRepository(this.adapter);
-		this.apiKeys = new ApiKeyRepository(this.adapter);
-	}
-
-	/**
-	 * Initialize the PostgreSQL schema (async, must be called after construction in PG mode)
-	 */
-	async initializeAsync(): Promise<void> {
-		if (!this.isSQLite) {
-			await ensureSchemaPg(this.adapter);
-			await runMigrationsPg(this.adapter);
-		}
-	}
-
-	setRuntimeConfig(runtime: RuntimeConfig): void {
-		this.runtime = runtime;
-
-		// Update retry config from runtime config if available
-		if (runtime.database?.retry) {
-			this.retryConfig = {
-				...this.retryConfig,
-				...runtime.database.retry,
-			};
-		}
-	}
-
-	/**
-	 * Get the underlying BunSqlAdapter for direct queries.
-	 * Use this instead of getDatabase() for cross-backend compatible raw queries.
-	 */
-	getAdapter(): BunSqlAdapter {
-		return this.adapter;
-	}
-
-	/**
-	 * Get the underlying bun:sqlite Database.
-	 * @deprecated Use getAdapter() for cross-backend compatible code.
-	 * Only valid when running in SQLite mode.
-	 */
-	getDatabase(): Database {
-		if (!this.sqliteDb) {
-			throw new Error(
-				"getDatabase() is not available in PostgreSQL mode. Use getAdapter() instead.",
-			);
-		}
-		return this.sqliteDb;
-	}
-
-	/**
-	 * Run database integrity check if it was skipped during initialization
-	 */
-	runIntegrityCheck(): void {
-		if (this.fastMode && this.sqliteDb) {
-			const integrityResult = this.sqliteDb
-				.query("PRAGMA integrity_check")
-				.get() as { integrity_check: string };
-			if (integrityResult.integrity_check !== "ok") {
-				console.error("\n❌ DATABASE INTEGRITY CHECK FAILED");
-				console.error("═".repeat(50));
-				console.error(`Error: ${integrityResult.integrity_check}\n`);
-				console.error("Your database may be corrupted. To repair it, run:");
-				console.error("  bun run cli --repair-db\n");
-				console.error(`${"═".repeat(50)}\n`);
-				throw new Error(
-					`Database integrity check failed: ${integrityResult.integrity_check}`,
-				);
-			}
-		}
-	}
-
-	/**
-	 * Get the current retry configuration
-	 */
-	getRetryConfig(): DatabaseRetryConfig {
-		return this.retryConfig;
-	}
-
-	// Account operations delegated to repository with retry logic
-	async getAllAccounts(): Promise<Account[]> {
-		return withDatabaseRetry(
-			() => this.accounts.findAll(),
-			this.retryConfig,
-			"getAllAccounts",
-		);
-	}
-
-	async getAccount(accountId: string): Promise<Account | null> {
-		return withDatabaseRetry(
-			() => this.accounts.findById(accountId),
-			this.retryConfig,
-			"getAccount",
-		);
-	}
-
-	async updateAccountTokens(
-		accountId: string,
-		accessToken: string,
-		expiresAt: number,
-		refreshToken?: string,
-	): Promise<void> {
-		await withDatabaseRetry(
-			() =>
-				this.accounts.updateTokens(
-					accountId,
-					accessToken,
-					expiresAt,
-					refreshToken,
-				),
-			this.retryConfig,
-			"updateAccountTokens",
-		);
-	}
-
-	async updateAccountUsage(accountId: string): Promise<void> {
-		const sessionDuration =
-			this.runtime?.sessionDurationMs || 5 * 60 * 60 * 1000;
-		await withDatabaseRetry(
-			() => this.accounts.incrementUsage(accountId, sessionDuration),
-			this.retryConfig,
-			"updateAccountUsage",
-		);
-	}
-
-	async markAccountRateLimited(
-		accountId: string,
-		until: number,
-	): Promise<void> {
-		await withDatabaseRetry(
-			() => this.accounts.setRateLimited(accountId, until),
-			this.retryConfig,
-			"markAccountRateLimited",
-		);
-	}
-
-	/**
-	 * Clear expired rate_limited_until values from all accounts
-	 * @param now The current timestamp to compare against
-	 * @returns Number of accounts that had their rate_limited_until cleared
-	 */
-	async clearExpiredRateLimits(now: number): Promise<number> {
-		return withDatabaseRetry(
-			() => this.accounts.clearExpiredRateLimits(now),
-			this.retryConfig,
-			"clearExpiredRateLimits",
-		);
-	}
-
-	async updateAccountRateLimitMeta(
-		accountId: string,
-		status: string,
-		reset: number | null,
-		remaining?: number | null,
-	): Promise<void> {
-		await this.accounts.updateRateLimitMeta(
-			accountId,
-			status,
-			reset,
-			remaining,
-		);
-	}
-
-	async forceResetAccountRateLimit(accountId: string): Promise<boolean> {
-		return withDatabaseRetry(
-			async () => {
-				const changes = await this.accounts.clearRateLimitState(accountId);
-				return changes >= 0;
-			},
-			this.retryConfig,
-			"forceResetAccountRateLimit",
-		);
-	}
-
-	async pauseAccount(accountId: string): Promise<void> {
-		await this.accounts.pause(accountId);
-	}
-
-	async resumeAccount(accountId: string): Promise<void> {
-		await this.accounts.resume(accountId);
-	}
-
-	async renameAccount(accountId: string, newName: string): Promise<void> {
-		await this.accounts.rename(accountId, newName);
-	}
-
-	async resetAccountSession(
-		accountId: string,
-		timestamp: number,
-	): Promise<void> {
-		await this.accounts.resetSession(accountId, timestamp);
-	}
-
-	async updateAccountRequestCount(
-		accountId: string,
-		count: number,
-	): Promise<void> {
-		await this.accounts.updateRequestCount(accountId, count);
-	}
-
-	async updateAccountPriority(
-		accountId: string,
-		priority: number,
-	): Promise<void> {
-		await this.accounts.updatePriority(accountId, priority);
-	}
-
-	async setAutoFallbackEnabled(
-		accountId: string,
-		enabled: boolean,
-	): Promise<void> {
-		await this.accounts.setAutoFallbackEnabled(accountId, enabled);
-	}
-
-	async hasAccountsForProvider(provider: string): Promise<boolean> {
-		return this.accounts.hasAccountsForProvider(provider);
-	}
-
-	// Request operations delegated to repository
-	async saveRequestMeta(
-		id: string,
-		method: string,
-		path: string,
-		accountUsed: string | null,
-		statusCode: number | null,
-		timestamp?: number,
-		apiKeyId?: string,
-		apiKeyName?: string,
-	): Promise<void> {
-		await withDatabaseRetry(
-			() =>
-				this.requests.saveMeta(
-					id,
-					method,
-					path,
-					accountUsed,
-					statusCode,
-					timestamp,
-					apiKeyId,
-					apiKeyName,
-				),
-			this.retryConfig,
-			"saveRequestMeta",
-		);
-	}
-
-	async saveRequest(
-		id: string,
-		method: string,
-		path: string,
-		accountUsed: string | null,
-		statusCode: number | null,
-		success: boolean,
-		errorMessage: string | null,
-		responseTime: number,
-		failoverAttempts: number,
-		usage?: RequestData["usage"],
-		agentUsed?: string,
-		apiKeyId?: string,
-		apiKeyName?: string,
-	): Promise<void> {
-		await withDatabaseRetry(
-			() =>
-				this.requests.save({
-					id,
-					method,
-					path,
-					accountUsed,
-					statusCode,
-					success,
-					errorMessage,
-					responseTime,
-					failoverAttempts,
-					usage,
-					agentUsed,
-					apiKeyId,
-					apiKeyName,
-				}),
-			this.retryConfig,
-			"saveRequest",
-		);
-	}
-
-	async updateRequestUsage(
-		requestId: string,
-		usage: RequestData["usage"],
-	): Promise<void> {
-		await withDatabaseRetry(
-			() => this.requests.updateUsage(requestId, usage),
-			this.retryConfig,
-			"updateRequestUsage",
-		);
-	}
-
-	async saveRequestPayload(id: string, data: unknown): Promise<void> {
-		await withDatabaseRetry(
-			() => this.requests.savePayload(id, data),
-			this.retryConfig,
-			"saveRequestPayload",
-		);
-	}
-
-	async saveRequestPayloadRaw(id: string, json: string): Promise<void> {
-		await withDatabaseRetry(
-			() => this.requests.savePayloadRaw(id, json),
-			this.retryConfig,
-			"saveRequestPayloadRaw",
-		);
-	}
-
-	async getRequestPayload(id: string): Promise<unknown | null> {
-		return this.requests.getPayload(id);
-	}
-
-	async listRequestPayloads(
-		limit = 50,
-	): Promise<Array<{ id: string; json: string }>> {
-		return this.requests.listPayloads(limit);
-	}
-
-	async listRequestPayloadsWithAccountNames(
-		limit = 50,
-	): Promise<Array<{ id: string; json: string; account_name: string | null }>> {
-		return this.requests.listPayloadsWithAccountNames(limit);
-	}
-
-	// OAuth operations delegated to repository
-	async createOAuthSession(
-		sessionId: string,
-		accountName: string,
-		verifier: string,
-		mode: "console" | "claude-oauth",
-		customEndpoint?: string,
-		ttlMinutes = 10,
-	): Promise<void> {
-		await this.oauth.createSession(
-			sessionId,
-			accountName,
-			verifier,
-			mode,
-			customEndpoint,
-			ttlMinutes,
-		);
-	}
-
-	async getOAuthSession(sessionId: string): Promise<{
-		accountName: string;
-		verifier: string;
-		mode: "console" | "claude-oauth";
-		customEndpoint?: string;
-	} | null> {
-		return this.oauth.getSession(sessionId);
-	}
-
-	async deleteOAuthSession(sessionId: string): Promise<void> {
-		await this.oauth.deleteSession(sessionId);
-	}
-
-	async cleanupExpiredOAuthSessions(): Promise<number> {
-		return this.oauth.cleanupExpiredSessions();
-	}
-
-	// Strategy operations delegated to repository
-	async getStrategy(name: string): Promise<{
-		name: string;
-		config: Record<string, unknown>;
-		updatedAt: number;
-	} | null> {
-		return this.strategy.getStrategy(name);
-	}
-
-	async setStrategy(
-		name: string,
-		config: Record<string, unknown>,
-	): Promise<void> {
-		await this.strategy.set(name, config);
-	}
-
-	async listStrategies(): Promise<
-		Array<{
-			name: string;
-			config: Record<string, unknown>;
-			updatedAt: number;
-		}>
-	> {
-		return this.strategy.list();
-	}
-
-	async deleteStrategy(name: string): Promise<boolean> {
-		return this.strategy.delete(name);
-	}
-
-	// Analytics methods delegated to request repository
-	async getRecentRequests(limit = 100): Promise<
-		Array<{
-			id: string;
-			timestamp: number;
-			method: string;
-			path: string;
-			account_used: string | null;
-			status_code: number | null;
-			success: boolean;
-			response_time_ms: number | null;
-		}>
-	> {
-		return this.requests.getRecentRequests(limit);
-	}
-
-	async getRequestStats(since?: number): Promise<{
-		totalRequests: number;
-		successfulRequests: number;
-		failedRequests: number;
-		avgResponseTime: number | null;
-	}> {
-		return this.requests.getRequestStats(since);
-	}
-
-	async aggregateStats(rangeMs?: number) {
-		return this.requests.aggregateStats(rangeMs);
-	}
-
-	async getRecentErrors(limit?: number): Promise<string[]> {
-		return this.requests.getRecentErrors(limit);
-	}
-
-	async getTopModels(
-		limit?: number,
-	): Promise<Array<{ model: string; count: number }>> {
-		return this.requests.getTopModels(limit);
-	}
-
-	async getRequestsByAccount(since?: number): Promise<
-		Array<{
-			accountId: string;
-			accountName: string | null;
-			requestCount: number;
-			successRate: number;
-		}>
-	> {
-		return this.requests.getRequestsByAccount(since);
-	}
-
-	// Cleanup operations (payload by age; request metadata by age; plus orphan sweep)
-	async cleanupOldRequests(
-		payloadRetentionMs: number,
-		requestRetentionMs?: number,
-	): Promise<{
-		removedRequests: number;
-		removedPayloads: number;
-	}> {
-		const now = Date.now();
-		const payloadCutoff = now - payloadRetentionMs;
-
-		let removedRequests = 0;
-		if (
-			typeof requestRetentionMs === "number" &&
-			Number.isFinite(requestRetentionMs)
-		) {
-			const requestCutoff = now - requestRetentionMs;
-			removedRequests = await this.requests.deleteOlderThan(requestCutoff);
-		}
-		const removedPayloadsByAge =
-			await this.requests.deletePayloadsOlderThan(payloadCutoff);
-		const removedOrphans = await this.requests.deleteOrphanedPayloads();
-		return {
-			removedRequests,
-			removedPayloads: removedPayloadsByAge + removedOrphans,
-		};
-	}
-
-	// Agent preference operations delegated to repository
-	async getAgentPreference(agentId: string): Promise<{ model: string } | null> {
-		return this.agentPreferences.getPreference(agentId);
-	}
-
-	async getAllAgentPreferences(): Promise<
-		Array<{ agent_id: string; model: string }>
-	> {
-		return this.agentPreferences.getAllPreferences();
-	}
-
-	async setAgentPreference(agentId: string, model: string): Promise<void> {
-		await this.agentPreferences.setPreference(agentId, model);
-	}
-
-	async deleteAgentPreference(agentId: string): Promise<boolean> {
-		return this.agentPreferences.deletePreference(agentId);
-	}
-
-	async setBulkAgentPreferences(
-		agentIds: string[],
-		model: string,
-	): Promise<void> {
-		await this.agentPreferences.setBulkPreferences(agentIds, model);
-	}
-
-	async close(): Promise<void> {
-		await this.adapter.close();
-	}
-
-	async dispose(): Promise<void> {
-		await this.close();
-	}
-
-	// Optimize database periodically to maintain performance (SQLite only)
-	optimize(): void {
-		if (this.sqliteDb) {
-			this.sqliteDb.exec("PRAGMA optimize");
-			this.sqliteDb.exec("PRAGMA wal_checkpoint(PASSIVE)");
-		}
-	}
-
-	/** Compact and reclaim disk space (SQLite only) */
-	compact(): void {
-		if (this.sqliteDb) {
-			this.sqliteDb.exec("PRAGMA wal_checkpoint(TRUNCATE)");
-			this.sqliteDb.exec("VACUUM");
-		}
-	}
-
-	/** Incremental vacuum - reclaims space without blocking (SQLite only) */
-	incrementalVacuum(pages?: number): void {
-		if (!this.sqliteDb) return;
-
-		const autoVacuumMode = this.sqliteDb.query("PRAGMA auto_vacuum").get() as {
-			auto_vacuum: number;
-		};
-
-		if (autoVacuumMode.auto_vacuum !== 2) {
-			this.sqliteDb.exec("PRAGMA auto_vacuum = INCREMENTAL");
-			this.sqliteDb.exec("VACUUM");
-		}
-
-		if (pages) {
-			this.sqliteDb.exec(`PRAGMA incremental_vacuum(${pages})`);
-		} else {
-			this.sqliteDb.exec("PRAGMA incremental_vacuum");
-		}
-	}
-
-	// API Key operations delegated to repository
-	async getApiKeys() {
-		return withDatabaseRetry(
-			() => this.apiKeys.findAll(),
-			this.retryConfig,
-			"getApiKeys",
-		);
-	}
-
-	async getActiveApiKeys() {
-		return withDatabaseRetry(
-			() => this.apiKeys.findActive(),
-			this.retryConfig,
-			"getActiveApiKeys",
-		);
-	}
-
-	async getApiKey(id: string) {
-		return withDatabaseRetry(
-			() => this.apiKeys.findById(id),
-			this.retryConfig,
-			"getApiKey",
-		);
-	}
-
-	async getApiKeyByHashedKey(hashedKey: string) {
-		return withDatabaseRetry(
-			() => this.apiKeys.findByHashedKey(hashedKey),
-			this.retryConfig,
-			"getApiKeyByHashedKey",
-		);
-	}
-
-	async getApiKeyByName(name: string) {
-		return withDatabaseRetry(
-			() => this.apiKeys.findByName(name),
-			this.retryConfig,
-			"getApiKeyByName",
-		);
-	}
-
-	async apiKeyNameExists(name: string): Promise<boolean> {
-		return withDatabaseRetry(
-			() => this.apiKeys.nameExists(name),
-			this.retryConfig,
-			"apiKeyNameExists",
-		);
-	}
-
-	async createApiKey(apiKey: {
-		id: string;
-		name: string;
-		hashedKey: string;
-		prefixLast8: string;
-		createdAt: number;
-		lastUsed?: number | null;
-		isActive: boolean;
-		role?: "admin" | "api-only";
-	}): Promise<void> {
-		await withDatabaseRetry(
-			() =>
-				this.apiKeys.create({
-					id: apiKey.id,
-					name: apiKey.name,
-					hashed_key: apiKey.hashedKey,
-					prefix_last_8: apiKey.prefixLast8,
-					created_at: apiKey.createdAt,
-					last_used: apiKey.lastUsed || null,
-					is_active: apiKey.isActive ? 1 : 0,
-					role: apiKey.role || "api-only",
-				}),
-			this.retryConfig,
-			"createApiKey",
-		);
-	}
-
-	async updateApiKeyUsage(id: string, timestamp: number): Promise<void> {
-		await withDatabaseRetry(
-			() => this.apiKeys.updateUsage(id, timestamp),
-			this.retryConfig,
-			"updateApiKeyUsage",
-		);
-	}
-
-	async disableApiKey(id: string): Promise<boolean> {
-		return withDatabaseRetry(
-			() => this.apiKeys.disable(id),
-			this.retryConfig,
-			"disableApiKey",
-		);
-	}
-
-	async enableApiKey(id: string): Promise<boolean> {
-		return withDatabaseRetry(
-			() => this.apiKeys.enable(id),
-			this.retryConfig,
-			"enableApiKey",
-		);
-	}
-
-	async deleteApiKey(id: string): Promise<boolean> {
-		return withDatabaseRetry(
-			() => this.apiKeys.delete(id),
-			this.retryConfig,
-			"deleteApiKey",
-		);
-	}
-
-	async updateApiKeyRole(
-		id: string,
-		role: "admin" | "api-only",
-	): Promise<boolean> {
-		return withDatabaseRetry(
-			() => this.apiKeys.updateRole(id, role),
-			this.retryConfig,
-			"updateApiKeyRole",
-		);
-	}
-
-	async countActiveApiKeys(): Promise<number> {
-		return withDatabaseRetry(
-			() => this.apiKeys.countActive(),
-			this.retryConfig,
-			"countActiveApiKeys",
-		);
-	}
-
-	async countAllApiKeys(): Promise<number> {
-		return withDatabaseRetry(
-			() => this.apiKeys.countAll(),
-			this.retryConfig,
-			"countAllApiKeys",
-		);
-	}
-
-	/**
-	 * Clear all API keys (for testing purposes)
-	 */
-	async clearApiKeys(): Promise<void> {
-		await withDatabaseRetry(
-			() => this.apiKeys.clearAll(),
-			this.retryConfig,
-			"clearApiKeys",
-		);
-	}
-
-	/**
-	 * Get the API key repository for direct access
-	 */
-	getApiKeyRepository(): ApiKeyRepository {
-		return this.apiKeys;
-	}
-
-	/**
-	 * Get the stats repository for consolidated stats access
-	 */
-	getStatsRepository(): StatsRepository {
-		return this.stats;
-	}
+  private adapter: BunSqlAdapter;
+  /** Raw bun:sqlite Database — only set in SQLite mode */
+  private sqliteDb?: Database;
+  private runtime?: RuntimeConfig;
+  private dbConfig: DatabaseConfig;
+  private retryConfig: DatabaseRetryConfig;
+  private fastMode: boolean;
+  readonly isSQLite: boolean;
+
+  // Repositories
+  private accounts: AccountRepository;
+  private requests: RequestRepository;
+  private oauth: OAuthRepository;
+  private strategy: StrategyRepository;
+  private stats: StatsRepository;
+  private agentPreferences: AgentPreferenceRepository;
+  private apiKeys: ApiKeyRepository;
+
+  constructor(
+    dbPath?: string,
+    dbConfig?: DatabaseConfig,
+    retryConfig?: DatabaseRetryConfig,
+    fastMode = false,
+  ) {
+    this.fastMode = fastMode;
+
+    // Default database configuration optimized for distributed filesystems
+    this.dbConfig = {
+      walMode: true,
+      busyTimeoutMs: 10000,
+      cacheSize: -5000,
+      synchronous: "FULL",
+      mmapSize: 0,
+      pageSize: 2048,
+      ...dbConfig,
+    };
+
+    // Default retry configuration for database operations
+    this.retryConfig = {
+      attempts: 3,
+      delayMs: 100,
+      backoff: 2,
+      maxDelayMs: 5000,
+      ...retryConfig,
+    };
+
+    // Detect PostgreSQL mode from DATABASE_URL
+    const databaseUrl = process.env.DATABASE_URL;
+    const isPostgres =
+      databaseUrl &&
+      (databaseUrl.startsWith("postgres://") ||
+        databaseUrl.startsWith("postgresql://"));
+
+    if (isPostgres) {
+      this.isSQLite = false;
+      // Import SQL lazily to avoid issues when not needed
+      const { SQL } = require("bun");
+      const sqlClient = new SQL({
+        url: databaseUrl,
+        max: 10,
+        idleTimeout: 30,
+      });
+      this.adapter = new BunSqlAdapter(sqlClient, false);
+    } else {
+      this.isSQLite = true;
+      const resolvedPath = dbPath ?? resolveDbPath();
+
+      // Ensure the directory exists
+      const dir = dirname(resolvedPath);
+      mkdirSync(dir, { recursive: true });
+
+      this.sqliteDb = new Database(resolvedPath, { create: true });
+
+      // Apply SQLite configuration
+      configureSqlite(this.sqliteDb, this.dbConfig, fastMode);
+
+      ensureSchema(this.sqliteDb);
+      runMigrations(this.sqliteDb, resolvedPath);
+
+      this.adapter = new BunSqlAdapter(this.sqliteDb);
+    }
+
+    // Initialize repositories
+    this.accounts = new AccountRepository(this.adapter);
+    this.requests = new RequestRepository(this.adapter);
+    this.oauth = new OAuthRepository(this.adapter);
+    this.strategy = new StrategyRepository(this.adapter);
+    this.stats = new StatsRepository(this.adapter);
+    this.agentPreferences = new AgentPreferenceRepository(this.adapter);
+    this.apiKeys = new ApiKeyRepository(this.adapter);
+  }
+
+  /**
+   * Initialize the PostgreSQL schema (async, must be called after construction in PG mode)
+   */
+  async initializeAsync(): Promise<void> {
+    if (!this.isSQLite) {
+      await ensureSchemaPg(this.adapter);
+      await runMigrationsPg(this.adapter);
+    }
+  }
+
+  setRuntimeConfig(runtime: RuntimeConfig): void {
+    this.runtime = runtime;
+
+    // Update retry config from runtime config if available
+    if (runtime.database?.retry) {
+      this.retryConfig = {
+        ...this.retryConfig,
+        ...runtime.database.retry,
+      };
+    }
+  }
+
+  /**
+   * Get the underlying BunSqlAdapter for direct queries.
+   * Use this instead of getDatabase() for cross-backend compatible raw queries.
+   */
+  getAdapter(): BunSqlAdapter {
+    return this.adapter;
+  }
+
+  /**
+   * Get the underlying bun:sqlite Database.
+   * @deprecated Use getAdapter() for cross-backend compatible code.
+   * Only valid when running in SQLite mode.
+   */
+  getDatabase(): Database {
+    if (!this.sqliteDb) {
+      throw new Error(
+        "getDatabase() is not available in PostgreSQL mode. Use getAdapter() instead.",
+      );
+    }
+    return this.sqliteDb;
+  }
+
+  /**
+   * Run database integrity check if it was skipped during initialization
+   */
+  runIntegrityCheck(): void {
+    if (this.fastMode && this.sqliteDb) {
+      const integrityResult = this.sqliteDb
+        .query("PRAGMA integrity_check")
+        .get() as { integrity_check: string };
+      if (integrityResult.integrity_check !== "ok") {
+        console.error("\n❌ DATABASE INTEGRITY CHECK FAILED");
+        console.error("═".repeat(50));
+        console.error(`Error: ${integrityResult.integrity_check}\n`);
+        console.error("Your database may be corrupted. To repair it, run:");
+        console.error("  bun run cli --repair-db\n");
+        console.error(`${"═".repeat(50)}\n`);
+        throw new Error(
+          `Database integrity check failed: ${integrityResult.integrity_check}`,
+        );
+      }
+    }
+  }
+
+  /**
+   * Get the current retry configuration
+   */
+  getRetryConfig(): DatabaseRetryConfig {
+    return this.retryConfig;
+  }
+
+  // Account operations delegated to repository with retry logic
+  async getAllAccounts(): Promise<Account[]> {
+    return withDatabaseRetry(
+      () => this.accounts.findAll(),
+      this.retryConfig,
+      "getAllAccounts",
+    );
+  }
+
+  async getAccount(accountId: string): Promise<Account | null> {
+    return withDatabaseRetry(
+      () => this.accounts.findById(accountId),
+      this.retryConfig,
+      "getAccount",
+    );
+  }
+
+  async updateAccountTokens(
+    accountId: string,
+    accessToken: string,
+    expiresAt: number,
+    refreshToken?: string,
+  ): Promise<void> {
+    await withDatabaseRetry(
+      () =>
+        this.accounts.updateTokens(
+          accountId,
+          accessToken,
+          expiresAt,
+          refreshToken,
+        ),
+      this.retryConfig,
+      "updateAccountTokens",
+    );
+  }
+
+  async updateAccountUsage(accountId: string): Promise<void> {
+    const sessionDuration =
+      this.runtime?.sessionDurationMs || 5 * 60 * 60 * 1000;
+    await withDatabaseRetry(
+      () => this.accounts.incrementUsage(accountId, sessionDuration),
+      this.retryConfig,
+      "updateAccountUsage",
+    );
+  }
+
+  async markAccountRateLimited(
+    accountId: string,
+    until: number,
+  ): Promise<void> {
+    await withDatabaseRetry(
+      () => this.accounts.setRateLimited(accountId, until),
+      this.retryConfig,
+      "markAccountRateLimited",
+    );
+  }
+
+  /**
+   * Clear expired rate_limited_until values from all accounts
+   * @param now The current timestamp to compare against
+   * @returns Number of accounts that had their rate_limited_until cleared
+   */
+  async clearExpiredRateLimits(now: number): Promise<number> {
+    return withDatabaseRetry(
+      () => this.accounts.clearExpiredRateLimits(now),
+      this.retryConfig,
+      "clearExpiredRateLimits",
+    );
+  }
+
+  async updateAccountRateLimitMeta(
+    accountId: string,
+    status: string,
+    reset: number | null,
+    remaining?: number | null,
+  ): Promise<void> {
+    await this.accounts.updateRateLimitMeta(
+      accountId,
+      status,
+      reset,
+      remaining,
+    );
+  }
+
+  async forceResetAccountRateLimit(accountId: string): Promise<boolean> {
+    return withDatabaseRetry(
+      async () => {
+        const changes = await this.accounts.clearRateLimitState(accountId);
+        return changes >= 0;
+      },
+      this.retryConfig,
+      "forceResetAccountRateLimit",
+    );
+  }
+
+  async pauseAccount(accountId: string): Promise<void> {
+    await this.accounts.pause(accountId);
+  }
+
+  async resumeAccount(accountId: string): Promise<void> {
+    await this.accounts.resume(accountId);
+  }
+
+  // --- Utilization provider (injected from server to avoid circular deps) ---
+  private utilizationProvider: ((accountId: string) => number | null) | null =
+    null;
+
+  setUtilizationProvider(fn: (accountId: string) => number | null): void {
+    this.utilizationProvider = fn;
+  }
+
+  getAccountUtilization(accountId: string): number | null {
+    return this.utilizationProvider?.(accountId) ?? null;
+  }
+
+  async renameAccount(accountId: string, newName: string): Promise<void> {
+    await this.accounts.rename(accountId, newName);
+  }
+
+  async resetAccountSession(
+    accountId: string,
+    timestamp: number,
+  ): Promise<void> {
+    await this.accounts.resetSession(accountId, timestamp);
+  }
+
+  async updateAccountRequestCount(
+    accountId: string,
+    count: number,
+  ): Promise<void> {
+    await this.accounts.updateRequestCount(accountId, count);
+  }
+
+  async updateAccountPriority(
+    accountId: string,
+    priority: number,
+  ): Promise<void> {
+    await this.accounts.updatePriority(accountId, priority);
+  }
+
+  async setAutoFallbackEnabled(
+    accountId: string,
+    enabled: boolean,
+  ): Promise<void> {
+    await this.accounts.setAutoFallbackEnabled(accountId, enabled);
+  }
+
+  async hasAccountsForProvider(provider: string): Promise<boolean> {
+    return this.accounts.hasAccountsForProvider(provider);
+  }
+
+  // Request operations delegated to repository
+  async saveRequestMeta(
+    id: string,
+    method: string,
+    path: string,
+    accountUsed: string | null,
+    statusCode: number | null,
+    timestamp?: number,
+    apiKeyId?: string,
+    apiKeyName?: string,
+  ): Promise<void> {
+    await withDatabaseRetry(
+      () =>
+        this.requests.saveMeta(
+          id,
+          method,
+          path,
+          accountUsed,
+          statusCode,
+          timestamp,
+          apiKeyId,
+          apiKeyName,
+        ),
+      this.retryConfig,
+      "saveRequestMeta",
+    );
+  }
+
+  async saveRequest(
+    id: string,
+    method: string,
+    path: string,
+    accountUsed: string | null,
+    statusCode: number | null,
+    success: boolean,
+    errorMessage: string | null,
+    responseTime: number,
+    failoverAttempts: number,
+    usage?: RequestData["usage"],
+    agentUsed?: string,
+    apiKeyId?: string,
+    apiKeyName?: string,
+  ): Promise<void> {
+    await withDatabaseRetry(
+      () =>
+        this.requests.save({
+          id,
+          method,
+          path,
+          accountUsed,
+          statusCode,
+          success,
+          errorMessage,
+          responseTime,
+          failoverAttempts,
+          usage,
+          agentUsed,
+          apiKeyId,
+          apiKeyName,
+        }),
+      this.retryConfig,
+      "saveRequest",
+    );
+  }
+
+  async updateRequestUsage(
+    requestId: string,
+    usage: RequestData["usage"],
+  ): Promise<void> {
+    await withDatabaseRetry(
+      () => this.requests.updateUsage(requestId, usage),
+      this.retryConfig,
+      "updateRequestUsage",
+    );
+  }
+
+  async saveRequestPayload(id: string, data: unknown): Promise<void> {
+    await withDatabaseRetry(
+      () => this.requests.savePayload(id, data),
+      this.retryConfig,
+      "saveRequestPayload",
+    );
+  }
+
+  async saveRequestPayloadRaw(id: string, json: string): Promise<void> {
+    await withDatabaseRetry(
+      () => this.requests.savePayloadRaw(id, json),
+      this.retryConfig,
+      "saveRequestPayloadRaw",
+    );
+  }
+
+  async getRequestPayload(id: string): Promise<unknown | null> {
+    return this.requests.getPayload(id);
+  }
+
+  async listRequestPayloads(
+    limit = 50,
+  ): Promise<Array<{ id: string; json: string }>> {
+    return this.requests.listPayloads(limit);
+  }
+
+  async listRequestPayloadsWithAccountNames(
+    limit = 50,
+  ): Promise<Array<{ id: string; json: string; account_name: string | null }>> {
+    return this.requests.listPayloadsWithAccountNames(limit);
+  }
+
+  // OAuth operations delegated to repository
+  async createOAuthSession(
+    sessionId: string,
+    accountName: string,
+    verifier: string,
+    mode: "console" | "claude-oauth",
+    customEndpoint?: string,
+    ttlMinutes = 10,
+  ): Promise<void> {
+    await this.oauth.createSession(
+      sessionId,
+      accountName,
+      verifier,
+      mode,
+      customEndpoint,
+      ttlMinutes,
+    );
+  }
+
+  async getOAuthSession(sessionId: string): Promise<{
+    accountName: string;
+    verifier: string;
+    mode: "console" | "claude-oauth";
+    customEndpoint?: string;
+  } | null> {
+    return this.oauth.getSession(sessionId);
+  }
+
+  async deleteOAuthSession(sessionId: string): Promise<void> {
+    await this.oauth.deleteSession(sessionId);
+  }
+
+  async cleanupExpiredOAuthSessions(): Promise<number> {
+    return this.oauth.cleanupExpiredSessions();
+  }
+
+  // Strategy operations delegated to repository
+  async getStrategy(name: string): Promise<{
+    name: string;
+    config: Record<string, unknown>;
+    updatedAt: number;
+  } | null> {
+    return this.strategy.getStrategy(name);
+  }
+
+  async setStrategy(
+    name: string,
+    config: Record<string, unknown>,
+  ): Promise<void> {
+    await this.strategy.set(name, config);
+  }
+
+  async listStrategies(): Promise<
+    Array<{
+      name: string;
+      config: Record<string, unknown>;
+      updatedAt: number;
+    }>
+  > {
+    return this.strategy.list();
+  }
+
+  async deleteStrategy(name: string): Promise<boolean> {
+    return this.strategy.delete(name);
+  }
+
+  // Analytics methods delegated to request repository
+  async getRecentRequests(limit = 100): Promise<
+    Array<{
+      id: string;
+      timestamp: number;
+      method: string;
+      path: string;
+      account_used: string | null;
+      status_code: number | null;
+      success: boolean;
+      response_time_ms: number | null;
+    }>
+  > {
+    return this.requests.getRecentRequests(limit);
+  }
+
+  async getRequestStats(since?: number): Promise<{
+    totalRequests: number;
+    successfulRequests: number;
+    failedRequests: number;
+    avgResponseTime: number | null;
+  }> {
+    return this.requests.getRequestStats(since);
+  }
+
+  async aggregateStats(rangeMs?: number) {
+    return this.requests.aggregateStats(rangeMs);
+  }
+
+  async getRecentErrors(limit?: number): Promise<string[]> {
+    return this.requests.getRecentErrors(limit);
+  }
+
+  async getTopModels(
+    limit?: number,
+  ): Promise<Array<{ model: string; count: number }>> {
+    return this.requests.getTopModels(limit);
+  }
+
+  async getRequestsByAccount(since?: number): Promise<
+    Array<{
+      accountId: string;
+      accountName: string | null;
+      requestCount: number;
+      successRate: number;
+    }>
+  > {
+    return this.requests.getRequestsByAccount(since);
+  }
+
+  // Cleanup operations (payload by age; request metadata by age; plus orphan sweep)
+  async cleanupOldRequests(
+    payloadRetentionMs: number,
+    requestRetentionMs?: number,
+  ): Promise<{
+    removedRequests: number;
+    removedPayloads: number;
+  }> {
+    const now = Date.now();
+    const payloadCutoff = now - payloadRetentionMs;
+
+    let removedRequests = 0;
+    if (
+      typeof requestRetentionMs === "number" &&
+      Number.isFinite(requestRetentionMs)
+    ) {
+      const requestCutoff = now - requestRetentionMs;
+      removedRequests = await this.requests.deleteOlderThan(requestCutoff);
+    }
+    const removedPayloadsByAge =
+      await this.requests.deletePayloadsOlderThan(payloadCutoff);
+    const removedOrphans = await this.requests.deleteOrphanedPayloads();
+    return {
+      removedRequests,
+      removedPayloads: removedPayloadsByAge + removedOrphans,
+    };
+  }
+
+  // Agent preference operations delegated to repository
+  async getAgentPreference(agentId: string): Promise<{ model: string } | null> {
+    return this.agentPreferences.getPreference(agentId);
+  }
+
+  async getAllAgentPreferences(): Promise<
+    Array<{ agent_id: string; model: string }>
+  > {
+    return this.agentPreferences.getAllPreferences();
+  }
+
+  async setAgentPreference(agentId: string, model: string): Promise<void> {
+    await this.agentPreferences.setPreference(agentId, model);
+  }
+
+  async deleteAgentPreference(agentId: string): Promise<boolean> {
+    return this.agentPreferences.deletePreference(agentId);
+  }
+
+  async setBulkAgentPreferences(
+    agentIds: string[],
+    model: string,
+  ): Promise<void> {
+    await this.agentPreferences.setBulkPreferences(agentIds, model);
+  }
+
+  async close(): Promise<void> {
+    await this.adapter.close();
+  }
+
+  async dispose(): Promise<void> {
+    await this.close();
+  }
+
+  // Optimize database periodically to maintain performance (SQLite only)
+  optimize(): void {
+    if (this.sqliteDb) {
+      this.sqliteDb.exec("PRAGMA optimize");
+      this.sqliteDb.exec("PRAGMA wal_checkpoint(PASSIVE)");
+    }
+  }
+
+  /** Compact and reclaim disk space (SQLite only) */
+  compact(): void {
+    if (this.sqliteDb) {
+      this.sqliteDb.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+      this.sqliteDb.exec("VACUUM");
+    }
+  }
+
+  /** Incremental vacuum - reclaims space without blocking (SQLite only) */
+  incrementalVacuum(pages?: number): void {
+    if (!this.sqliteDb) return;
+
+    const autoVacuumMode = this.sqliteDb.query("PRAGMA auto_vacuum").get() as {
+      auto_vacuum: number;
+    };
+
+    if (autoVacuumMode.auto_vacuum !== 2) {
+      this.sqliteDb.exec("PRAGMA auto_vacuum = INCREMENTAL");
+      this.sqliteDb.exec("VACUUM");
+    }
+
+    if (pages) {
+      this.sqliteDb.exec(`PRAGMA incremental_vacuum(${pages})`);
+    } else {
+      this.sqliteDb.exec("PRAGMA incremental_vacuum");
+    }
+  }
+
+  // API Key operations delegated to repository
+  async getApiKeys() {
+    return withDatabaseRetry(
+      () => this.apiKeys.findAll(),
+      this.retryConfig,
+      "getApiKeys",
+    );
+  }
+
+  async getActiveApiKeys() {
+    return withDatabaseRetry(
+      () => this.apiKeys.findActive(),
+      this.retryConfig,
+      "getActiveApiKeys",
+    );
+  }
+
+  async getApiKey(id: string) {
+    return withDatabaseRetry(
+      () => this.apiKeys.findById(id),
+      this.retryConfig,
+      "getApiKey",
+    );
+  }
+
+  async getApiKeyByHashedKey(hashedKey: string) {
+    return withDatabaseRetry(
+      () => this.apiKeys.findByHashedKey(hashedKey),
+      this.retryConfig,
+      "getApiKeyByHashedKey",
+    );
+  }
+
+  async getApiKeyByName(name: string) {
+    return withDatabaseRetry(
+      () => this.apiKeys.findByName(name),
+      this.retryConfig,
+      "getApiKeyByName",
+    );
+  }
+
+  async apiKeyNameExists(name: string): Promise<boolean> {
+    return withDatabaseRetry(
+      () => this.apiKeys.nameExists(name),
+      this.retryConfig,
+      "apiKeyNameExists",
+    );
+  }
+
+  async createApiKey(apiKey: {
+    id: string;
+    name: string;
+    hashedKey: string;
+    prefixLast8: string;
+    createdAt: number;
+    lastUsed?: number | null;
+    isActive: boolean;
+    role?: "admin" | "api-only";
+  }): Promise<void> {
+    await withDatabaseRetry(
+      () =>
+        this.apiKeys.create({
+          id: apiKey.id,
+          name: apiKey.name,
+          hashed_key: apiKey.hashedKey,
+          prefix_last_8: apiKey.prefixLast8,
+          created_at: apiKey.createdAt,
+          last_used: apiKey.lastUsed || null,
+          is_active: apiKey.isActive ? 1 : 0,
+          role: apiKey.role || "api-only",
+        }),
+      this.retryConfig,
+      "createApiKey",
+    );
+  }
+
+  async updateApiKeyUsage(id: string, timestamp: number): Promise<void> {
+    await withDatabaseRetry(
+      () => this.apiKeys.updateUsage(id, timestamp),
+      this.retryConfig,
+      "updateApiKeyUsage",
+    );
+  }
+
+  async disableApiKey(id: string): Promise<boolean> {
+    return withDatabaseRetry(
+      () => this.apiKeys.disable(id),
+      this.retryConfig,
+      "disableApiKey",
+    );
+  }
+
+  async enableApiKey(id: string): Promise<boolean> {
+    return withDatabaseRetry(
+      () => this.apiKeys.enable(id),
+      this.retryConfig,
+      "enableApiKey",
+    );
+  }
+
+  async deleteApiKey(id: string): Promise<boolean> {
+    return withDatabaseRetry(
+      () => this.apiKeys.delete(id),
+      this.retryConfig,
+      "deleteApiKey",
+    );
+  }
+
+  async updateApiKeyRole(
+    id: string,
+    role: "admin" | "api-only",
+  ): Promise<boolean> {
+    return withDatabaseRetry(
+      () => this.apiKeys.updateRole(id, role),
+      this.retryConfig,
+      "updateApiKeyRole",
+    );
+  }
+
+  async countActiveApiKeys(): Promise<number> {
+    return withDatabaseRetry(
+      () => this.apiKeys.countActive(),
+      this.retryConfig,
+      "countActiveApiKeys",
+    );
+  }
+
+  async countAllApiKeys(): Promise<number> {
+    return withDatabaseRetry(
+      () => this.apiKeys.countAll(),
+      this.retryConfig,
+      "countAllApiKeys",
+    );
+  }
+
+  /**
+   * Clear all API keys (for testing purposes)
+   */
+  async clearApiKeys(): Promise<void> {
+    await withDatabaseRetry(
+      () => this.apiKeys.clearAll(),
+      this.retryConfig,
+      "clearApiKeys",
+    );
+  }
+
+  /**
+   * Get the API key repository for direct access
+   */
+  getApiKeyRepository(): ApiKeyRepository {
+    return this.apiKeys;
+  }
+
+  /**
+   * Get the stats repository for consolidated stats access
+   */
+  getStatsRepository(): StatsRepository {
+    return this.stats;
+  }
 }

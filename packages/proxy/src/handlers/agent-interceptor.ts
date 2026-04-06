@@ -10,10 +10,11 @@ import type { Agent } from "@better-ccflare/types";
 const log = new Logger("AgentInterceptor");
 
 export interface AgentInterceptResult {
-	modifiedBody: ArrayBuffer | null;
-	agentUsed: string | null;
-	originalModel: string | null;
-	appliedModel: string | null;
+  modifiedBody: ArrayBuffer | null;
+  agentUsed: string | null;
+  sessionKey: string | null;
+  originalModel: string | null;
+  appliedModel: string | null;
 }
 
 /**
@@ -23,172 +24,181 @@ export interface AgentInterceptResult {
  * @returns Modified request body and agent detection information
  */
 export async function interceptAndModifyRequest(
-	requestBodyBuffer: ArrayBuffer | null,
-	dbOps: DatabaseOperations,
+  requestBodyBuffer: ArrayBuffer | null,
+  dbOps: DatabaseOperations,
 ): Promise<AgentInterceptResult> {
-	// If no body, nothing to intercept
-	if (!requestBodyBuffer) {
-		return {
-			modifiedBody: null,
-			agentUsed: null,
-			originalModel: null,
-			appliedModel: null,
-		};
-	}
+  // If no body, nothing to intercept
+  if (!requestBodyBuffer) {
+    return {
+      modifiedBody: null,
+      agentUsed: null,
+      sessionKey: null,
+      originalModel: null,
+      appliedModel: null,
+    };
+  }
 
-	try {
-		// Parse the request body
-		const bodyText = new TextDecoder().decode(requestBodyBuffer);
-		const requestBody = JSON.parse(bodyText);
+  try {
+    // Parse the request body
+    const bodyText = new TextDecoder().decode(requestBodyBuffer);
+    const requestBody = JSON.parse(bodyText);
 
-		// Extract original model
-		const originalModel = requestBody.model || null;
+    // Extract original model
+    const originalModel = requestBody.model || null;
 
-		// Extract system prompt to detect agent usage
-		const systemPrompt = extractSystemPrompt(requestBody);
-		if (!systemPrompt) {
-			// No system prompt, no agent detection possible
-			log.info("No system prompt found in request");
-			return {
-				modifiedBody: requestBodyBuffer,
-				agentUsed: null,
-				originalModel,
-				appliedModel: originalModel,
-			};
-		}
+    // Extract system prompt to detect agent usage
+    const systemPrompt = extractSystemPrompt(requestBody);
+    if (!systemPrompt) {
+      // No system prompt, no agent detection possible
+      log.info("No system prompt found in request");
+      return {
+        modifiedBody: requestBodyBuffer,
+        agentUsed: null,
+        sessionKey: null,
+        originalModel,
+        appliedModel: originalModel,
+      };
+    }
 
-		// Register additional agent directories from system prompt
-		log.info(`System prompt length: ${systemPrompt.length} chars`);
-		if (systemPrompt.includes("CLAUDE.md")) {
-			log.info("System prompt contains CLAUDE.md reference");
+    // Extract session key from working directory in system prompt
+    const sessionKey = extractSessionKey(systemPrompt);
 
-			// Look specifically for the Contents pattern
-			if (systemPrompt.includes("Contents of")) {
-				const contentsIndex = systemPrompt.indexOf("Contents of");
-				const start = contentsIndex;
-				const end = Math.min(systemPrompt.length, contentsIndex + 200);
-				const sample = systemPrompt.substring(start, end);
-				log.info(`Found 'Contents of' pattern: ${sample}`);
-			} else {
-				log.info("System prompt does NOT contain 'Contents of' pattern");
-				// Show a sample of what we do have
-				const claudeIndex = systemPrompt.indexOf("CLAUDE.md");
-				const start = Math.max(0, claudeIndex - 50);
-				const end = Math.min(systemPrompt.length, claudeIndex + 50);
-				const sample = systemPrompt.substring(start, end);
-				log.info(`Sample around CLAUDE.md: ...${sample}...`);
-			}
+    // Register additional agent directories from system prompt
+    log.info(`System prompt length: ${systemPrompt.length} chars`);
+    if (systemPrompt.includes("CLAUDE.md")) {
+      log.info("System prompt contains CLAUDE.md reference");
 
-			// Count all CLAUDE.md occurrences
-			const matches = systemPrompt.match(/CLAUDE\.md/g);
-			log.info(`Total CLAUDE.md occurrences: ${matches ? matches.length : 0}`);
-		}
+      // Look specifically for the Contents pattern
+      if (systemPrompt.includes("Contents of")) {
+        const contentsIndex = systemPrompt.indexOf("Contents of");
+        const start = contentsIndex;
+        const end = Math.min(systemPrompt.length, contentsIndex + 200);
+        const sample = systemPrompt.substring(start, end);
+        log.info(`Found 'Contents of' pattern: ${sample}`);
+      } else {
+        log.info("System prompt does NOT contain 'Contents of' pattern");
+        // Show a sample of what we do have
+        const claudeIndex = systemPrompt.indexOf("CLAUDE.md");
+        const start = Math.max(0, claudeIndex - 50);
+        const end = Math.min(systemPrompt.length, claudeIndex + 50);
+        const sample = systemPrompt.substring(start, end);
+        log.info(`Sample around CLAUDE.md: ...${sample}...`);
+      }
 
-		const extraDirs = extractAgentDirectories(systemPrompt);
-		log.info(
-			`Found ${extraDirs.length} potential agent directories in system prompt`,
-		);
+      // Count all CLAUDE.md occurrences
+      const matches = systemPrompt.match(/CLAUDE\.md/g);
+      log.info(`Total CLAUDE.md occurrences: ${matches ? matches.length : 0}`);
+    }
 
-		for (const dir of extraDirs) {
-			log.info(`Checking potential workspace from agents directory: ${dir}`);
-			// Extract workspace path from agents directory
-			// Convert /path/to/project/.claude/agents to /path/to/project
-			const workspacePath = dir.replace(/\/.claude\/agents$/, "");
+    const extraDirs = extractAgentDirectories(systemPrompt);
+    log.info(
+      `Found ${extraDirs.length} potential agent directories in system prompt`,
+    );
 
-			// Only register if the workspace exists
-			if (existsSync(workspacePath)) {
-				await agentRegistry.registerWorkspace(workspacePath);
-				log.info(`Registered workspace: ${workspacePath}`);
-			} else {
-				log.info(`Workspace path does not exist: ${workspacePath}`);
-			}
-		}
+    for (const dir of extraDirs) {
+      log.info(`Checking potential workspace from agents directory: ${dir}`);
+      // Extract workspace path from agents directory
+      // Convert /path/to/project/.claude/agents to /path/to/project
+      const workspacePath = dir.replace(/\/.claude\/agents$/, "");
 
-		// Detect agent usage
-		const agents = await agentRegistry.getAgents();
-		const detectedAgent = agents.find((agent: Agent) =>
-			systemPrompt.includes(agent.systemPrompt.trim()),
-		);
+      // Only register if the workspace exists
+      if (existsSync(workspacePath)) {
+        await agentRegistry.registerWorkspace(workspacePath);
+        log.info(`Registered workspace: ${workspacePath}`);
+      } else {
+        log.info(`Workspace path does not exist: ${workspacePath}`);
+      }
+    }
 
-		if (!detectedAgent) {
-			// No agent detected
-			return {
-				modifiedBody: requestBodyBuffer,
-				agentUsed: null,
-				originalModel,
-				appliedModel: originalModel,
-			};
-		}
+    // Detect agent usage
+    const agents = await agentRegistry.getAgents();
+    const detectedAgent = agents.find((agent: Agent) =>
+      systemPrompt.includes(agent.systemPrompt.trim()),
+    );
 
-		log.info(
-			`Detected agent usage: ${detectedAgent.name} (${detectedAgent.id})`,
-		);
+    if (!detectedAgent) {
+      // No agent detected
+      return {
+        modifiedBody: requestBodyBuffer,
+        agentUsed: null,
+        sessionKey,
+        originalModel,
+        appliedModel: originalModel,
+      };
+    }
 
-		// Look up model preference
-		const preference = await dbOps.getAgentPreference(detectedAgent.id);
-		const preferredModel = preference?.model || detectedAgent.model;
+    log.info(
+      `Detected agent usage: ${detectedAgent.name} (${detectedAgent.id})`,
+    );
 
-		// If the preferred model is the same as original, no modification needed
-		if (preferredModel === originalModel) {
-			return {
-				modifiedBody: requestBodyBuffer,
-				agentUsed: detectedAgent.id,
-				originalModel,
-				appliedModel: originalModel,
-			};
-		}
+    // Look up model preference
+    const preference = await dbOps.getAgentPreference(detectedAgent.id);
+    const preferredModel = preference?.model || detectedAgent.model;
 
-		// Modify the request body with the preferred model
-		log.info(`Modifying model from ${originalModel} to ${preferredModel}`);
-		requestBody.model = preferredModel;
+    // If the preferred model is the same as original, no modification needed
+    if (preferredModel === originalModel) {
+      return {
+        modifiedBody: requestBodyBuffer,
+        agentUsed: detectedAgent.id,
+        sessionKey,
+        originalModel,
+        appliedModel: originalModel,
+      };
+    }
 
-		// Convert back to buffer
-		const modifiedBodyText = JSON.stringify(requestBody);
-		const encodedData = new TextEncoder().encode(modifiedBodyText);
-		// Create a new ArrayBuffer to ensure compatibility
-		const modifiedBody = new ArrayBuffer(encodedData.byteLength);
-		new Uint8Array(modifiedBody).set(encodedData);
+    // Modify the request body with the preferred model
+    log.info(`Modifying model from ${originalModel} to ${preferredModel}`);
+    requestBody.model = preferredModel;
 
-		return {
-			modifiedBody,
-			agentUsed: detectedAgent.id,
-			originalModel,
-			appliedModel: preferredModel,
-		};
-	} catch (error) {
-		log.error("Failed to intercept/modify request:", error);
-		// On error, return original body unmodified
-		return {
-			modifiedBody: requestBodyBuffer,
-			agentUsed: null,
-			originalModel: null,
-			appliedModel: null,
-		};
-	}
+    // Convert back to buffer
+    const modifiedBodyText = JSON.stringify(requestBody);
+    const encodedData = new TextEncoder().encode(modifiedBodyText);
+    // Create a new ArrayBuffer to ensure compatibility
+    const modifiedBody = new ArrayBuffer(encodedData.byteLength);
+    new Uint8Array(modifiedBody).set(encodedData);
+
+    return {
+      modifiedBody,
+      agentUsed: detectedAgent.id,
+      sessionKey,
+      originalModel,
+      appliedModel: preferredModel,
+    };
+  } catch (error) {
+    log.error("Failed to intercept/modify request:", error);
+    // On error, return original body unmodified
+    return {
+      modifiedBody: requestBodyBuffer,
+      agentUsed: null,
+      sessionKey: null,
+      originalModel: null,
+      appliedModel: null,
+    };
+  }
 }
 
 interface MessageContent {
-	type?: string;
-	text?: string;
+  type?: string;
+  text?: string;
 }
 
 interface Message {
-	role?: string;
-	content?: string | MessageContent[];
+  role?: string;
+  content?: string | MessageContent[];
 }
 
 interface SystemMessage {
-	type: string;
-	text: string;
-	cache_control?: {
-		type: string;
-	};
+  type: string;
+  text: string;
+  cache_control?: {
+    type: string;
+  };
 }
 
 interface RequestBody {
-	messages?: Message[];
-	model?: string;
-	system?: string | SystemMessage[];
+  messages?: Message[];
+  model?: string;
+  system?: string | SystemMessage[];
 }
 
 /**
@@ -198,125 +208,125 @@ interface RequestBody {
  * @returns System prompt string or null
  */
 function extractSystemPrompt(requestBody: RequestBody): string | null {
-	const extractLog = new Logger("ExtractSystemPrompt");
-	const allSystemContent: string[] = [];
+  const extractLog = new Logger("ExtractSystemPrompt");
+  const allSystemContent: string[] = [];
 
-	// First check for system field at root level (Claude Code pattern)
-	if (requestBody.system) {
-		extractLog.info("Found system field at root level");
-		if (typeof requestBody.system === "string") {
-			extractLog.info(
-				`System field is string, length: ${requestBody.system.length}`,
-			);
-			allSystemContent.push(requestBody.system);
-		}
-		if (Array.isArray(requestBody.system)) {
-			extractLog.info(
-				`System field is array with ${requestBody.system.length} items`,
-			);
-			// Concatenate all text from system messages
-			const systemText = requestBody.system
-				.filter(
-					(item): item is SystemMessage => item.type === "text" && !!item.text,
-				)
-				.map((item) => item.text)
-				.join("\n");
-			extractLog.info(`Extracted system text length: ${systemText.length}`);
-			if (systemText) {
-				allSystemContent.push(systemText);
-			}
-		}
-	}
+  // First check for system field at root level (Claude Code pattern)
+  if (requestBody.system) {
+    extractLog.info("Found system field at root level");
+    if (typeof requestBody.system === "string") {
+      extractLog.info(
+        `System field is string, length: ${requestBody.system.length}`,
+      );
+      allSystemContent.push(requestBody.system);
+    }
+    if (Array.isArray(requestBody.system)) {
+      extractLog.info(
+        `System field is array with ${requestBody.system.length} items`,
+      );
+      // Concatenate all text from system messages
+      const systemText = requestBody.system
+        .filter(
+          (item): item is SystemMessage => item.type === "text" && !!item.text,
+        )
+        .map((item) => item.text)
+        .join("\n");
+      extractLog.info(`Extracted system text length: ${systemText.length}`);
+      if (systemText) {
+        allSystemContent.push(systemText);
+      }
+    }
+  }
 
-	// Then check messages array
-	if (requestBody.messages && Array.isArray(requestBody.messages)) {
-		extractLog.info(
-			`Checking messages array with ${requestBody.messages.length} messages`,
-		);
+  // Then check messages array
+  if (requestBody.messages && Array.isArray(requestBody.messages)) {
+    extractLog.info(
+      `Checking messages array with ${requestBody.messages.length} messages`,
+    );
 
-		// Look for system messages
-		const systemMessage = requestBody.messages.find(
-			(msg) => msg.role === "system",
-		);
+    // Look for system messages
+    const systemMessage = requestBody.messages.find(
+      (msg) => msg.role === "system",
+    );
 
-		if (systemMessage) {
-			extractLog.info("Found system role message");
-			if (typeof systemMessage.content === "string") {
-				extractLog.info(
-					`System message content is string, length: ${systemMessage.content.length}`,
-				);
-				allSystemContent.push(systemMessage.content);
-			}
-			if (Array.isArray(systemMessage.content)) {
-				extractLog.info(
-					`System message content is array with ${systemMessage.content.length} items`,
-				);
-				const systemText = systemMessage.content
-					.filter(
-						(item): item is MessageContent & { text: string } =>
-							item.type === "text" && !!item.text,
-					)
-					.map((item) => item.text)
-					.join("\n");
-				extractLog.info(
-					`Extracted system message text length: ${systemText.length}`,
-				);
-				if (systemText) {
-					allSystemContent.push(systemText);
-				}
-			}
-		} else {
-			extractLog.info("No system role message found, checking user messages");
-		}
+    if (systemMessage) {
+      extractLog.info("Found system role message");
+      if (typeof systemMessage.content === "string") {
+        extractLog.info(
+          `System message content is string, length: ${systemMessage.content.length}`,
+        );
+        allSystemContent.push(systemMessage.content);
+      }
+      if (Array.isArray(systemMessage.content)) {
+        extractLog.info(
+          `System message content is array with ${systemMessage.content.length} items`,
+        );
+        const systemText = systemMessage.content
+          .filter(
+            (item): item is MessageContent & { text: string } =>
+              item.type === "text" && !!item.text,
+          )
+          .map((item) => item.text)
+          .join("\n");
+        extractLog.info(
+          `Extracted system message text length: ${systemText.length}`,
+        );
+        if (systemText) {
+          allSystemContent.push(systemText);
+        }
+      }
+    } else {
+      extractLog.info("No system role message found, checking user messages");
+    }
 
-		// Also check for system prompt in user messages
-		const userMessage = requestBody.messages.find((msg) => msg.role === "user");
+    // Also check for system prompt in user messages
+    const userMessage = requestBody.messages.find((msg) => msg.role === "user");
 
-		if (userMessage && Array.isArray(userMessage.content)) {
-			// Concatenate all text content from the user message
-			const textContents = userMessage.content.filter(
-				(item): item is MessageContent & { text: string } =>
-					item.type === "text" && !!item.text,
-			);
+    if (userMessage && Array.isArray(userMessage.content)) {
+      // Concatenate all text content from the user message
+      const textContents = userMessage.content.filter(
+        (item): item is MessageContent & { text: string } =>
+          item.type === "text" && !!item.text,
+      );
 
-			extractLog.info(
-				`Found ${textContents.length} text content items in user message`,
-			);
+      extractLog.info(
+        `Found ${textContents.length} text content items in user message`,
+      );
 
-			const allUserText = textContents.map((item) => item.text).join("\n");
+      const allUserText = textContents.map((item) => item.text).join("\n");
 
-			if (
-				allUserText.includes("Contents of") &&
-				allUserText.includes("CLAUDE.md")
-			) {
-				extractLog.info(
-					"User message contains 'Contents of' and 'CLAUDE.md' - including in system prompt",
-				);
-				allSystemContent.push(allUserText);
-			}
-		} else if (userMessage && typeof userMessage.content === "string") {
-			if (
-				userMessage.content.includes("Contents of") &&
-				userMessage.content.includes("CLAUDE.md")
-			) {
-				extractLog.info(
-					"User message string contains 'Contents of' and 'CLAUDE.md' - including in system prompt",
-				);
-				allSystemContent.push(userMessage.content);
-			}
-		}
-	}
+      if (
+        allUserText.includes("Contents of") &&
+        allUserText.includes("CLAUDE.md")
+      ) {
+        extractLog.info(
+          "User message contains 'Contents of' and 'CLAUDE.md' - including in system prompt",
+        );
+        allSystemContent.push(allUserText);
+      }
+    } else if (userMessage && typeof userMessage.content === "string") {
+      if (
+        userMessage.content.includes("Contents of") &&
+        userMessage.content.includes("CLAUDE.md")
+      ) {
+        extractLog.info(
+          "User message string contains 'Contents of' and 'CLAUDE.md' - including in system prompt",
+        );
+        allSystemContent.push(userMessage.content);
+      }
+    }
+  }
 
-	// Combine all system content
-	if (allSystemContent.length > 0) {
-		const combined = allSystemContent.join("\n\n");
-		extractLog.info(
-			`Combined system prompt length: ${combined.length} from ${allSystemContent.length} sources`,
-		);
-		return combined;
-	}
+  // Combine all system content
+  if (allSystemContent.length > 0) {
+    const combined = allSystemContent.join("\n\n");
+    extractLog.info(
+      `Combined system prompt length: ${combined.length} from ${allSystemContent.length} sources`,
+    );
+    return combined;
+  }
 
-	return null;
+  return null;
 }
 
 /**
@@ -341,76 +351,93 @@ function extractSystemPrompt(requestBody: RequestBody): string | null {
  * @returns Array of agent directory paths
  */
 function extractAgentDirectories(systemPrompt: string): string[] {
-	const extractDirLog = new Logger("ExtractAgentDirs");
-	const directories = new Set<string>();
-	const isProduction = process.env.NODE_ENV === "production";
+  const extractDirLog = new Logger("ExtractAgentDirs");
+  const directories = new Set<string>();
+  const isProduction = process.env.NODE_ENV === "production";
 
-	// PERFORMANCE: Process both patterns with optimized logging
-	const processPath = (
-		rawPath: string,
-		description: string,
-		finalPath?: string,
-		options?: { additionalAllowedPaths?: string[] },
-	) => {
-		const pathToValidate = finalPath || rawPath;
+  // PERFORMANCE: Process both patterns with optimized logging
+  const processPath = (
+    rawPath: string,
+    description: string,
+    finalPath?: string,
+    options?: { additionalAllowedPaths?: string[] },
+  ) => {
+    const pathToValidate = finalPath || rawPath;
 
-		// Validate path using comprehensive security checks (cached)
-		const validationOptions = {
-			description,
-			...(options || {}),
-		};
-		const validation = validatePath(pathToValidate, validationOptions);
-		if (!validation.isValid) {
-			extractDirLog.warn(
-				`Rejected invalid ${description}: ${pathToValidate} - ${validation.reason}`,
-			);
-			return;
-		}
+    // Validate path using comprehensive security checks (cached)
+    const validationOptions = {
+      description,
+      ...(options || {}),
+    };
+    const validation = validatePath(pathToValidate, validationOptions);
+    if (!validation.isValid) {
+      extractDirLog.warn(
+        `Rejected invalid ${description}: ${pathToValidate} - ${validation.reason}`,
+      );
+      return;
+    }
 
-		// PERFORMANCE: Minimal logging in production
-		if (isProduction) {
-			extractDirLog.debug(
-				`Validated ${description}: ${validation.resolvedPath}`,
-			);
-		} else {
-			extractDirLog.info(
-				`Validated ${description}: ${validation.resolvedPath}`,
-			);
-		}
+    // PERFORMANCE: Minimal logging in production
+    if (isProduction) {
+      extractDirLog.debug(
+        `Validated ${description}: ${validation.resolvedPath}`,
+      );
+    } else {
+      extractDirLog.info(
+        `Validated ${description}: ${validation.resolvedPath}`,
+      );
+    }
 
-		directories.add(validation.resolvedPath);
-	};
+    directories.add(validation.resolvedPath);
+  };
 
-	// Regex #1: Look for explicit /.claude/agents paths
-	const agentPathRegex = /([\\/][\w\-. ]*?\/.claude\/agents)(?=[\s"'\]])/g;
-	const agentPathMatches = systemPrompt.matchAll(agentPathRegex);
-	for (const match of agentPathMatches) {
-		processPath(match[1], "agent path", undefined, undefined);
-	}
+  // Regex #1: Look for explicit /.claude/agents paths
+  const agentPathRegex = /([\\/][\w\-. ]*?\/.claude\/agents)(?=[\s"'\]])/g;
+  const agentPathMatches = systemPrompt.matchAll(agentPathRegex);
+  for (const match of agentPathMatches) {
+    processPath(match[1], "agent path", undefined, undefined);
+  }
 
-	// Regex #2: Look for repo root pattern "Contents of (.*?)/CLAUDE.md"
-	const repoRootRegex = /Contents of ([^\n]+?)\/CLAUDE\.md/g;
-	const repoRootMatches = systemPrompt.matchAll(repoRootRegex);
-	for (const match of repoRootMatches) {
-		const repoRoot = match[1];
+  // Regex #2: Look for repo root pattern "Contents of (.*?)/CLAUDE.md"
+  const repoRootRegex = /Contents of ([^\n]+?)\/CLAUDE\.md/g;
+  const repoRootMatches = systemPrompt.matchAll(repoRootRegex);
+  for (const match of repoRootMatches) {
+    const repoRoot = match[1];
 
-		// Clean up any escaped slashes and construct agents directory first
-		const cleanedRoot = repoRoot.replace(/\\\//g, "/");
-		const agentsDir = join(cleanedRoot, ".claude", "agents");
+    // Clean up any escaped slashes and construct agents directory first
+    const cleanedRoot = repoRoot.replace(/\\\//g, "/");
+    const agentsDir = join(cleanedRoot, ".claude", "agents");
 
-		// Validate the constructed agents directory directly
-		// Allow the home .claude directory path for agent functionality (consciously decided to support Claude AI agents)
-		// SECURITY NOTE: This is a deliberate decision to allow Claude Code to access agents in ~/.claude directory.
-		// The path validation system was restricting access to ~/.claude/.claude/agents which is needed for proper agent functionality.
-		// This addition maintains security by only allowing this specific path while keeping all other restrictions in place.
-		const additionalAllowedPaths = [join(homedir(), ".claude")];
-		processPath(
-			agentsDir,
-			"constructed agents directory from CLAUDE.md",
-			undefined,
-			{ additionalAllowedPaths },
-		);
-	}
+    // Validate the constructed agents directory directly
+    // Allow the home .claude directory path for agent functionality (consciously decided to support Claude AI agents)
+    // SECURITY NOTE: This is a deliberate decision to allow Claude Code to access agents in ~/.claude directory.
+    // The path validation system was restricting access to ~/.claude/.claude/agents which is needed for proper agent functionality.
+    // This addition maintains security by only allowing this specific path while keeping all other restrictions in place.
+    const additionalAllowedPaths = [join(homedir(), ".claude")];
+    processPath(
+      agentsDir,
+      "constructed agents directory from CLAUDE.md",
+      undefined,
+      { additionalAllowedPaths },
+    );
+  }
 
-	return Array.from(directories);
+  return Array.from(directories);
+}
+
+/**
+ * Extracts a session key from the system prompt.
+ * Claude Code includes "Primary working directory: /path/to/project" in every request,
+ * which uniquely identifies each worktree/session.
+ */
+function extractSessionKey(systemPrompt: string): string | null {
+  const cwdMatch = systemPrompt.match(
+    /Primary working directory:\s*(.+?)(?:\n|$)/,
+  );
+  if (cwdMatch?.[1]) {
+    const cwd = cwdMatch[1].trim();
+    log.debug(`Extracted session key from CWD: ${cwd}`);
+    return cwd;
+  }
+  return null;
 }
