@@ -29,6 +29,7 @@ for (const envPath of possibleEnvPaths) {
 
 import {
 	addAccount,
+	analyzeCacheInvalidation,
 	analyzePerformance,
 	clearRequestHistory,
 	compactDatabase,
@@ -98,6 +99,9 @@ interface ParsedArgs {
 	setPriority: [string, number] | null;
 	reauthenticate: string | null;
 	analyze: boolean;
+	analyzeCache: boolean;
+	analyzeCacheDays: number | null;
+	analyzeCacheOutput: string | null;
 	repairDb: boolean;
 	doctor: boolean;
 	doctorFull: boolean;
@@ -450,6 +454,9 @@ function parseArgs(args: string[]): ParsedArgs {
 		setPriority: null,
 		reauthenticate: null,
 		analyze: false,
+		analyzeCache: false,
+		analyzeCacheDays: null,
+		analyzeCacheOutput: null,
 		repairDb: false,
 		doctor: false,
 		doctorFull: false,
@@ -708,6 +715,29 @@ function parseArgs(args: string[]): ParsedArgs {
 			}
 			case "--analyze":
 				parsed.analyze = true;
+				break;
+			case "--analyze-cache":
+				parsed.analyzeCache = true;
+				break;
+			case "--days": {
+				if (i + 1 >= args.length || args[i + 1].startsWith("--")) {
+					console.error("❌ --days requires a numeric value");
+					fastExit(1);
+				}
+				const daysVal = parseFloat(args[++i]);
+				if (Number.isNaN(daysVal) || daysVal <= 0) {
+					console.error("❌ --days must be a positive number");
+					fastExit(1);
+				}
+				parsed.analyzeCacheDays = daysVal;
+				break;
+			}
+			case "--output":
+				if (i + 1 >= args.length || args[i + 1].startsWith("--")) {
+					console.error("❌ --output requires a file path");
+					fastExit(1);
+				}
+				parsed.analyzeCacheOutput = args[++i];
 				break;
 			case "--repair-db":
 				parsed.repairDb = true;
@@ -1339,6 +1369,18 @@ Examples:
 
 	if (parsed.analyze) {
 		await analyzePerformance(dbOps);
+		await exitGracefully(0);
+	}
+
+	if (parsed.analyzeCache) {
+		const sinceMs =
+			parsed.analyzeCacheDays !== null
+				? parsed.analyzeCacheDays * 24 * 60 * 60 * 1000
+				: undefined;
+		await analyzeCacheInvalidation(dbOps, {
+			sinceMs,
+			output: parsed.analyzeCacheOutput ?? undefined,
+		});
 		await exitGracefully(0);
 	}
 

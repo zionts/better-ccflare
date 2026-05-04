@@ -1,6 +1,7 @@
 // Export all commands
 export * from "./commands/account";
 export * from "./commands/analyze";
+export * from "./commands/analyze-cache";
 export * from "./commands/api-key";
 export * from "./commands/database-doctor";
 export * from "./commands/database-repair";
