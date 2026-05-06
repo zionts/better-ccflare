@@ -30,7 +30,13 @@ for (const envPath of possibleEnvPaths) {
 import {
 	addAccount,
 	analyzeCacheInvalidation,
+	analyzeCacheTrend,
 	analyzePerformance,
+	analyzePrefix,
+	analyzeSkill,
+	analyzeThinking,
+	analyzeTopTurns,
+	analyzeWorkspace,
 	clearRequestHistory,
 	compactDatabase,
 	deleteApiKey,
@@ -102,6 +108,17 @@ interface ParsedArgs {
 	analyzeCache: boolean;
 	analyzeCacheDays: number | null;
 	analyzeCacheOutput: string | null;
+	analyzeTopTurns: boolean;
+	analyzeTopN: number | null;
+	analyzeWorkspace: boolean;
+	analyzeWorkspaceGroupBy: "full" | "workspace" | "project" | null;
+	analyzeSkill: boolean;
+	analyzePrefix: boolean;
+	analyzePrefixSample: number | null;
+	analyzeCacheTrend: boolean;
+	analyzeCacheTrendGranularity: "hour" | "day" | null;
+	analyzeThinking: boolean;
+	analyzeThinkingGroupBy: "model" | "agent" | "model+agent" | null;
 	repairDb: boolean;
 	doctor: boolean;
 	doctorFull: boolean;
@@ -457,6 +474,17 @@ function parseArgs(args: string[]): ParsedArgs {
 		analyzeCache: false,
 		analyzeCacheDays: null,
 		analyzeCacheOutput: null,
+		analyzeTopTurns: false,
+		analyzeTopN: null,
+		analyzeWorkspace: false,
+		analyzeWorkspaceGroupBy: null,
+		analyzeSkill: false,
+		analyzePrefix: false,
+		analyzePrefixSample: null,
+		analyzeCacheTrend: false,
+		analyzeCacheTrendGranularity: null,
+		analyzeThinking: false,
+		analyzeThinkingGroupBy: null,
 		repairDb: false,
 		doctor: false,
 		doctorFull: false,
@@ -718,6 +746,84 @@ function parseArgs(args: string[]): ParsedArgs {
 				break;
 			case "--analyze-cache":
 				parsed.analyzeCache = true;
+				break;
+			case "--analyze-top-turns":
+				parsed.analyzeTopTurns = true;
+				break;
+			case "--top": {
+				if (i + 1 >= args.length || args[i + 1].startsWith("--")) {
+					console.error("❌ --top requires a positive integer");
+					fastExit(1);
+				}
+				const n = parseInt(args[++i], 10);
+				if (Number.isNaN(n) || n <= 0) {
+					console.error("❌ --top must be a positive integer");
+					fastExit(1);
+				}
+				parsed.analyzeTopN = n;
+				break;
+			}
+			case "--analyze-workspace":
+				parsed.analyzeWorkspace = true;
+				break;
+			case "--group-by": {
+				if (i + 1 >= args.length || args[i + 1].startsWith("--")) {
+					console.error("❌ --group-by requires a value");
+					fastExit(1);
+				}
+				const v = args[++i];
+				// Used by both workspace (full|workspace|project) and thinking (model|agent|model+agent)
+				if (["full", "workspace", "project"].includes(v)) {
+					parsed.analyzeWorkspaceGroupBy = v as
+						| "full"
+						| "workspace"
+						| "project";
+				}
+				if (["model", "agent", "model+agent"].includes(v)) {
+					parsed.analyzeThinkingGroupBy = v as
+						| "model"
+						| "agent"
+						| "model+agent";
+				}
+				break;
+			}
+			case "--analyze-skill":
+				parsed.analyzeSkill = true;
+				break;
+			case "--analyze-prefix":
+				parsed.analyzePrefix = true;
+				break;
+			case "--sample": {
+				if (i + 1 >= args.length || args[i + 1].startsWith("--")) {
+					console.error("❌ --sample requires a positive integer");
+					fastExit(1);
+				}
+				const n = parseInt(args[++i], 10);
+				if (Number.isNaN(n) || n <= 0) {
+					console.error("❌ --sample must be a positive integer");
+					fastExit(1);
+				}
+				parsed.analyzePrefixSample = n;
+				break;
+			}
+			case "--analyze-cache-trend":
+				parsed.analyzeCacheTrend = true;
+				break;
+			case "--granularity": {
+				if (i + 1 >= args.length || args[i + 1].startsWith("--")) {
+					console.error("❌ --granularity requires a value (hour or day)");
+					fastExit(1);
+				}
+				const v = args[++i];
+				if (v !== "hour" && v !== "day") {
+					console.error("❌ --granularity must be 'hour' or 'day'");
+					fastExit(1);
+				}
+				parsed.analyzeCacheTrendGranularity = v;
+				break;
+			}
+			case "--analyze-thinking":
+				parsed.analyzeThinking = true;
 				break;
 			case "--days": {
 				if (i + 1 >= args.length || args[i + 1].startsWith("--")) {
@@ -1380,6 +1486,56 @@ Examples:
 		await analyzeCacheInvalidation(dbOps, {
 			sinceMs,
 			output: parsed.analyzeCacheOutput ?? undefined,
+		});
+		await exitGracefully(0);
+	}
+
+	const sinceMsFromDays =
+		parsed.analyzeCacheDays !== null
+			? parsed.analyzeCacheDays * 24 * 60 * 60 * 1000
+			: undefined;
+
+	if (parsed.analyzeTopTurns) {
+		await analyzeTopTurns(dbOps, {
+			sinceMs: sinceMsFromDays,
+			topN: parsed.analyzeTopN ?? undefined,
+		});
+		await exitGracefully(0);
+	}
+
+	if (parsed.analyzeWorkspace) {
+		await analyzeWorkspace(dbOps, {
+			sinceMs: sinceMsFromDays,
+			groupBy: parsed.analyzeWorkspaceGroupBy ?? undefined,
+		});
+		await exitGracefully(0);
+	}
+
+	if (parsed.analyzeSkill) {
+		await analyzeSkill(dbOps, { sinceMs: sinceMsFromDays });
+		await exitGracefully(0);
+	}
+
+	if (parsed.analyzePrefix) {
+		await analyzePrefix(dbOps, {
+			sinceMs: sinceMsFromDays,
+			sample: parsed.analyzePrefixSample ?? undefined,
+		});
+		await exitGracefully(0);
+	}
+
+	if (parsed.analyzeCacheTrend) {
+		await analyzeCacheTrend(dbOps, {
+			sinceMs: sinceMsFromDays,
+			granularity: parsed.analyzeCacheTrendGranularity ?? undefined,
+		});
+		await exitGracefully(0);
+	}
+
+	if (parsed.analyzeThinking) {
+		await analyzeThinking(dbOps, {
+			sinceMs: sinceMsFromDays,
+			groupBy: parsed.analyzeThinkingGroupBy ?? undefined,
 		});
 		await exitGracefully(0);
 	}
