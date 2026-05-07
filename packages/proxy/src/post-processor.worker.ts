@@ -75,23 +75,24 @@ const MAX_REQUEST_BODY_BYTES = 4 * 1024 * 1024; // 4MB - afterburn needs full co
 // Using embedded WASM to avoid "Missing tiktoken_bg.wasm" errors in bunx
 let tokenEncoder: Tiktoken | null = null;
 
+// Post ready FIRST so the controller doesn't time out. Tiktoken is a best-effort
+// fallback for token counting when the API doesn't return usage; everything else
+// in the worker (request logging, account stats) must not block on it. Earlier
+// regression: a WASM hiccup in worker context held the IIFE indefinitely, never
+// posted ready, every request dropped silently.
+console.log("[WORKER] posting ready");
+self.postMessage({ type: "ready" } satisfies ReadyMessage);
+
 (async () => {
 	try {
-		// Decode embedded WASM from base64
 		const wasmBuffer = Buffer.from(EMBEDDED_TIKTOKEN_WASM, "base64");
-
-		// Initialize tiktoken with embedded WASM
 		await init((imports) => WebAssembly.instantiate(wasmBuffer, imports));
-
-		// Create encoder with cl100k_base model
 		tokenEncoder = new Tiktoken(
 			model.bpe_ranks,
 			model.special_tokens,
 			model.pat_str,
 		);
-
 		log.info("Tiktoken encoder initialized successfully with embedded WASM");
-		self.postMessage({ type: "ready" } satisfies ReadyMessage);
 	} catch (error) {
 		log.error("Failed to initialize tiktoken encoder:", error);
 		console.error("[WORKER] Tiktoken initialization failed:", error);
