@@ -212,6 +212,11 @@ export class AutoRefreshScheduler {
 
 			// Proactively refresh Codex OAuth tokens expiring within the safety window
 			await this.checkAndRefreshCodexTokens();
+
+			// Proactively refresh Anthropic OAuth access tokens expiring within the
+			// safety window. Keeps idle accounts (no traffic, no window reset) from
+			// expiring their ~8h access token and forcing a manual re-auth.
+			await this.checkAndRefreshAnthropicTokens();
 		} catch (error) {
 			if (error instanceof Error) {
 				const errorMessage = `Error in auto-refresh check: ${error.name}: ${error.message}`;
@@ -951,6 +956,176 @@ export class AutoRefreshScheduler {
 			} catch (error) {
 				log.error(
 					`Failed to proactively refresh Codex token for ${row.name}:`,
+					error,
+				);
+			}
+		}
+	}
+
+	/**
+	 * Proactively refresh Anthropic OAuth access tokens that are expiring within
+	 * the safety window.
+	 *
+	 * Anthropic accounts already get their rate-limit window reset via the
+	 * dummy-message probe path (sendDummyMessage). That path, however, only fires
+	 * when an account's usage window has reset — an account that is simply idle
+	 * (no traffic, no window reset) never has its OAuth access token refreshed by
+	 * the scheduler. Because the access token lives only ~8h (vs the multi-day
+	 * refresh token), an account idle longer than that expires and forces a
+	 * manual re-auth. This method mirrors the qwen/codex proactive refreshers to
+	 * keep the access token fresh purely off the refresh token — no dummy message
+	 * and no upstream /v1/messages call required.
+	 *
+	 * It uses the SAME TOKEN_SAFETY_WINDOW_MS the on-demand path
+	 * (getValidAccessToken / refreshAccessTokenSafe in token-manager.ts) uses, so
+	 * the two never disagree about when a token is "expiring soon". Deduplication
+	 * via proxyContext.refreshInFlight ensures we never double-refresh alongside
+	 * an on-demand or probe-triggered refresh already in flight for the account.
+	 *
+	 * Unlike qwen/codex, Anthropic accounts can be paused or locally rate-limited,
+	 * so we apply the same skip guards the main eligibility query uses: skip
+	 * paused accounts and skip accounts inside an active per-account cooldown
+	 * (rate_limited_until in the future — see PR #200 / issue #199). Console
+	 * (API-key) accounts have no refresh token, so `refresh_token IS NOT NULL`
+	 * naturally excludes them.
+	 */
+	private async checkAndRefreshAnthropicTokens(): Promise<void> {
+		if (!this.db) return;
+
+		const now = Date.now();
+		const expiryThreshold = now + TOKEN_SAFETY_WINDOW_MS;
+
+		const accounts = await this.db.query<{
+			id: string;
+			name: string;
+			provider: string;
+			refresh_token: string;
+			access_token: string | null;
+			expires_at: number | null;
+			custom_endpoint: string | null;
+		}>(
+			`
+			SELECT id, name, provider, refresh_token, access_token, expires_at, custom_endpoint
+			FROM accounts
+			WHERE
+				provider = 'anthropic'
+				AND refresh_token IS NOT NULL
+				AND auto_refresh_enabled = 1
+				AND (
+					access_token IS NULL
+					OR expires_at IS NULL
+					OR expires_at <= ?
+				)
+				-- Skip accounts still inside an active per-account cooldown — probing
+				-- or refreshing them while ccflare knows upstream will reject is wasteful
+				-- (mirrors the main eligibility query / issue #199, bug 1).
+				AND (
+					rate_limited_until IS NULL OR rate_limited_until <= ?
+				)
+				-- Skip paused accounts. A proactive token refresh on a paused account
+				-- has no value (no traffic will use the token) and just spends a refresh.
+				AND COALESCE(paused, 0) = 0
+		`,
+			[expiryThreshold, now],
+		);
+
+		if (accounts.length === 0) return;
+
+		log.info(
+			`Proactive Anthropic token refresh: ${accounts.length} account(s) need refresh`,
+		);
+
+		for (const row of accounts) {
+			// Skip if a refresh is already in-flight for this account (deduplication).
+			// This is what prevents a double-refresh racing the on-demand path in
+			// token-manager.ts (refreshAccessTokenSafe registers the same key).
+			if (this.proxyContext.refreshInFlight.has(row.id)) {
+				log.debug(
+					`Skipping proactive Anthropic refresh for ${row.name} — refresh already in-flight`,
+				);
+				continue;
+			}
+
+			try {
+				log.info(`Refreshing Anthropic token for account: ${row.name}`);
+
+				const provider = getProvider(row.provider);
+				if (!provider) {
+					log.error(`No provider found for anthropic (account: ${row.name})`);
+					continue;
+				}
+
+				const account: Account = {
+					id: row.id,
+					name: row.name,
+					provider: row.provider,
+					api_key: null,
+					refresh_token: row.refresh_token,
+					access_token: row.access_token,
+					expires_at: row.expires_at,
+					request_count: 0,
+					total_requests: 0,
+					last_used: null,
+					created_at: 0,
+					rate_limited_until: null,
+					rate_limited_reason: null,
+					rate_limited_at: null,
+					session_start: null,
+					session_request_count: 0,
+					paused: false,
+					rate_limit_reset: null,
+					rate_limit_status: null,
+					rate_limit_remaining: null,
+					priority: 0,
+					auto_fallback_enabled: false,
+					auto_refresh_enabled: true,
+					auto_pause_on_overage_enabled: false,
+					peak_hours_pause_enabled: false,
+					custom_endpoint: row.custom_endpoint,
+					model_mappings: null,
+					cross_region_mode: null,
+					model_fallbacks: null,
+					billing_type: null,
+					pause_reason: null,
+					refresh_token_issued_at: null,
+					consecutive_rate_limits: 0,
+				};
+
+				// Register in refreshInFlight so concurrent request-triggered refreshes
+				// join this one instead of issuing a second refresh.
+				const refreshPromise = provider
+					.refreshToken(account, this.proxyContext.runtime.clientId)
+					.then(async (result) => {
+						// Match token-manager's success path exactly: persist access_token,
+						// expires_at, refresh_token and stamp refresh_token_issued_at. The
+						// Anthropic refresh endpoint may omit a new refresh_token, in which
+						// case the provider already echoes the previous one; guard anyway so
+						// we never blank it.
+						const newRefreshToken = result.refreshToken || row.refresh_token;
+						await this.db.run(
+							`UPDATE accounts SET access_token = ?, expires_at = ?, refresh_token = ?, refresh_token_issued_at = ? WHERE id = ?`,
+							[
+								result.accessToken,
+								result.expiresAt,
+								newRefreshToken,
+								Date.now(),
+								row.id,
+							],
+						);
+						log.info(
+							`Anthropic token refreshed for ${row.name}, expires at ${new Date(result.expiresAt).toISOString()}`,
+						);
+						return result.accessToken;
+					})
+					.finally(() => {
+						this.proxyContext.refreshInFlight.delete(row.id);
+					});
+
+				this.proxyContext.refreshInFlight.set(row.id, refreshPromise);
+				await refreshPromise;
+			} catch (error) {
+				log.error(
+					`Failed to proactively refresh Anthropic token for ${row.name}:`,
 					error,
 				);
 			}
