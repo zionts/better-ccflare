@@ -235,19 +235,29 @@ export async function refreshAccessTokenSafe(
 		// Create a new refresh promise and store it
 		const refreshPromise = provider
 			.refreshToken(account, ctx.runtime.clientId)
-			.then((result: TokenRefreshResult) => {
-				// 1. Persist to database asynchronously
-				ctx.asyncWriter.enqueue(() =>
-					ctx.dbOps.updateAccountTokens(
-						account.id,
-						result.accessToken,
-						result.expiresAt,
-						result.refreshToken,
-					),
+			.then(async (result: TokenRefreshResult) => {
+				// 1. Persist to the database DURABLY before the refreshed token is
+				// used. OAuth providers rotate the refresh_token on refresh: the
+				// old one is consumed/invalid the moment the new one is issued, so
+				// if the rotated value is lost (crash/restart before an async write
+				// flushes, or the async writer dropping the job under load) the
+				// account is stranded and needs manual re-auth.
+				//
+				// updateAccountTokens() is self-contained (wraps withDatabaseRetry),
+				// so we await it directly rather than enqueueing it fire-and-forget.
+				// If the write throws, we propagate the error below so the refreshed
+				// token (whose rotated refresh_token was never saved) is NOT returned
+				// or written into the in-memory account.
+				await ctx.dbOps.updateAccountTokens(
+					account.id,
+					result.accessToken,
+					result.expiresAt,
+					result.refreshToken,
 				);
 
-				// 2. Update the live in-memory account object immediately
-				// This prevents subsequent requests from seeing stale token data
+				// 2. Update the live in-memory account object only after the durable
+				// write succeeds. This prevents subsequent requests from seeing token
+				// data that isn't yet persisted.
 				account.access_token = result.accessToken;
 				account.expires_at = result.expiresAt;
 				if (result.refreshToken) {
