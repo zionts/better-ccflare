@@ -3,7 +3,6 @@ import type { FullUsageData } from "@better-ccflare/types";
 import { useEffect, useState } from "react";
 import { cn } from "../../lib/utils";
 import {
-	isAnthropicPeakHour,
 	isZaiPeakHour,
 	providerShowsCreditsBalance,
 	providerShowsWeeklyUsage,
@@ -447,7 +446,6 @@ export function RateLimitProgress({
 	}
 
 	const isZaiPeak = provider === "zai" && isZaiPeakHour(now);
-	const isAnthropicPeak = provider === "anthropic" && isAnthropicPeakHour(now);
 	const throttledWindowSet = new Set(usageThrottledWindows);
 
 	return (
@@ -468,24 +466,14 @@ export function RateLimitProgress({
 					</span>
 				</div>
 			)}
-			{provider === "anthropic" && (
-				<div className="flex items-center gap-2">
-					<span
-						className={`inline-flex items-center gap-1 px-2 py-0.5 text-xs font-medium rounded-full ${
-							isAnthropicPeak
-								? "bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-400"
-								: "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400"
-						}`}
-					>
-						<span
-							className={`h-1.5 w-1.5 rounded-full ${isAnthropicPeak ? "bg-orange-500" : "bg-green-500"}`}
-						/>
-						{isAnthropicPeak
-							? "Peak hours (5–11am PT, weekdays)"
-							: "Off-peak hours"}
-					</span>
-				</div>
-			)}
+			{/*
+			 * Anthropic accounts intentionally do NOT show a peak-hours badge:
+			 * the auto-pause scheduler (packages/proxy/src/auto-refresh-scheduler.ts,
+			 * checkPeakHoursPause) hard-filters to provider = 'zai', so peak hours has
+			 * no pause/routing effect for Anthropic. Showing the badge there misleads
+			 * users into thinking the account will pause. The informational peak-hour
+			 * tag still appears in the request log (RequestsTab.tsx).
+			 */}
 			{usages.map((usage, _index) => {
 				const percentage = usage.utilization;
 				const isAvailable = percentage !== null;
