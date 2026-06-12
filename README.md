@@ -325,7 +325,14 @@ export ANTHROPIC_BASE_URL=http://localhost:8080
 claude
 ```
 
-**Important:** When using Claude CLI with an active OAuth login, do **NOT** set `ANTHROPIC_AUTH_TOKEN`. Setting both will trigger a warning from Claude CLI about conflicting authentication methods.
+**Stopping repeated Claude CLI logins:** If you set `ANTHROPIC_BASE_URL` but **neither** `ANTHROPIC_AUTH_TOKEN` **nor** `ANTHROPIC_API_KEY`, Claude CLI authenticates with its own subscription OAuth login — which expires roughly daily and re-prompts you to log in, even though every request is actually served from better-ccflare's account pool. To stop the re-login prompts, set `ANTHROPIC_AUTH_TOKEN` to any non-empty placeholder:
+
+```bash
+export ANTHROPIC_BASE_URL=http://localhost:8080
+export ANTHROPIC_AUTH_TOKEN=better-ccflare  # any non-empty placeholder
+```
+
+Per Claude CLI's [documented authentication precedence](https://code.claude.com/docs/en/authentication#authentication-precedence), `ANTHROPIC_AUTH_TOKEN` (sent as an `Authorization: Bearer` header) takes precedence over subscription OAuth and is the recommended method when routing through a proxy or gateway — so it cleanly replaces the OAuth login rather than conflicting with it. The proxy overwrites the inbound `Authorization` header with its own account credentials, so the token's value is ignored (unless you've configured better-ccflare API keys — see Option 2). Prefer `ANTHROPIC_AUTH_TOKEN` over `ANTHROPIC_API_KEY`: the API-key path triggers Claude CLI's "Detected a custom API key — approve?" prompt, while the bearer token does not. GUI-launched apps that don't source your shell rc need the variable set in the OS environment too (on macOS, `launchctl setenv ANTHROPIC_AUTH_TOKEN better-ccflare`).
 
 ### Option 2: Using API Key Authentication
 
