@@ -1,5 +1,8 @@
 import {
+	computeOverloadRetryDelayMs,
 	getModelList,
+	getOverloadRetryMaxAttempts,
+	isOverloadRetryEnabled,
 	logError,
 	ProviderError,
 	TIME_CONSTANTS,
@@ -624,6 +627,64 @@ export async function proxyWithAccount(
 		let rawResponse = isSyntheticProviderResponse(transformedRequest)
 			? materializeSyntheticResponse(transformedRequest)
 			: await makeProxyRequest(transformedRequest);
+
+		// In-place retry for a transient, reset-less 529 (overloaded_error)
+		// BEFORE the account is cooled downstream (issue #271). A 529 without a
+		// retry-after / reset header is a per-request blip at the upstream edge —
+		// not an account-level quota state — so a short jittered retry on the
+		// SAME account usually succeeds without burning a cooldown or surfacing a
+		// 503. We gate strictly on provider.parseRateLimit reporting a 529 with no
+		// resetTime (exactly the `upstream_529_overloaded_no_reset` path); 429s
+		// and reset-bearing 529s are authoritative and keep their cooldown.
+		// Synthetic internal requests (keepalive replays, auto-refresh probes) are
+		// excluded so we never amplify those bursts.
+		if (
+			!isSyntheticInternal &&
+			rawResponse.status === 529 &&
+			isOverloadRetryEnabled()
+		) {
+			const isResetLess529 = (resp: Response): boolean => {
+				if (resp.status !== 529) return false;
+				const info = provider.parseRateLimit(resp);
+				return info.isRateLimited && info.resetTime === undefined;
+			};
+			const maxOverloadRetries = getOverloadRetryMaxAttempts();
+			let overloadAttempt = 0;
+			while (
+				overloadAttempt < maxOverloadRetries &&
+				isResetLess529(rawResponse)
+			) {
+				overloadAttempt++;
+				const delay = computeOverloadRetryDelayMs(overloadAttempt);
+				log.warn(
+					`Account ${account.name} returned reset-less 529 (overloaded) — in-place retry ${overloadAttempt}/${maxOverloadRetries} after ${delay}ms`,
+				);
+				await new Promise((resolve) => setTimeout(resolve, delay));
+				// Rebuild the upstream request: a sent Request's body stream is
+				// consumed, so we reconstruct from the buffered body + headers,
+				// mirroring the thinking-block / cache_control retry paths below.
+				const retryInit: RequestInit & { duplex?: "half" } = {
+					method: req.method,
+					headers,
+				};
+				if (effectiveBodyBuffer) {
+					retryInit.body = new Uint8Array(effectiveBodyBuffer);
+					retryInit.duplex = "half";
+				}
+				const retryProviderRequest = new Request(targetUrl, retryInit);
+				const retryRequest = provider.transformRequestBody
+					? await provider.transformRequestBody(retryProviderRequest, account)
+					: retryProviderRequest;
+				rawResponse = isSyntheticProviderResponse(retryRequest)
+					? materializeSyntheticResponse(retryRequest)
+					: await makeProxyRequest(retryRequest);
+			}
+			if (overloadAttempt > 0 && rawResponse.status !== 529) {
+				log.info(
+					`Account ${account.name} 529 absorbed by in-place retry after ${overloadAttempt} attempt(s)`,
+				);
+			}
+		}
 
 		// Check if this is a Claude provider and we got an invalid thinking signature error
 		const isClaudeProvider =

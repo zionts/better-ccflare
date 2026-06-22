@@ -54,7 +54,64 @@ export const TIME_CONSTANTS = {
 	RATE_LIMIT_BACKOFF_BASE_MS: 30 * 1000, // 30s: cooldown for the 1st 429 in a streak
 	RATE_LIMIT_BACKOFF_MAX_MS: 5 * 60 * 1000, // 5min: ceiling for the exponential ramp
 	RATE_LIMIT_RESET_STABILITY_MS: 5 * 60 * 1000, // 5min: healthy operation needed to reset the streak counter
+
+	// In-place retry for a reset-less 529 (overloaded_error) BEFORE the account
+	// is cooled. A 529 without a retry-after/reset header is a transient,
+	// per-request blip at the upstream edge — not an account-level quota state —
+	// so a short jittered retry on the SAME account usually succeeds without
+	// burning a cooldown or surfacing a 503 to the client. 429s and 529s that
+	// carry a reset header keep the normal cooldown path (they're authoritative).
+	// Override at runtime via CCFLARE_OVERLOAD_RETRY_BASE_MS /
+	// CCFLARE_OVERLOAD_RETRY_MAX_MS / CCFLARE_OVERLOAD_RETRY_MAX_ATTEMPTS /
+	// CCFLARE_OVERLOAD_RETRY_ENABLED.
+	OVERLOAD_RETRY_BASE_MS: 750, // base for full-jitter backoff on the 1st retry
+	OVERLOAD_RETRY_MAX_MS: 3 * 1000, // 3s: ceiling for a single backoff sleep
+	OVERLOAD_RETRY_MAX_ATTEMPTS: 2, // extra attempts after the initial request
 } as const;
+
+/**
+ * Whether reset-less 529s should be retried in-place before cooling the
+ * account. Defaults to enabled; set CCFLARE_OVERLOAD_RETRY_ENABLED=false (or 0)
+ * to restore the prior cool-immediately behavior.
+ */
+export function isOverloadRetryEnabled(): boolean {
+	const raw = process.env.CCFLARE_OVERLOAD_RETRY_ENABLED;
+	if (raw === undefined) return true;
+	return raw !== "false" && raw !== "0";
+}
+
+/**
+ * Max number of in-place retries for a reset-less 529 (in addition to the
+ * initial request). Reads CCFLARE_OVERLOAD_RETRY_MAX_ATTEMPTS from env.
+ * Uses || (not ??) so 0/NaN env values fall through to the default.
+ */
+export function getOverloadRetryMaxAttempts(): number {
+	const raw = Number(process.env.CCFLARE_OVERLOAD_RETRY_MAX_ATTEMPTS);
+	return raw || TIME_CONSTANTS.OVERLOAD_RETRY_MAX_ATTEMPTS;
+}
+
+/**
+ * Full-jitter backoff (ms) for a given overload-retry attempt (1-based):
+ *   cap = min(BASE * 2^(attempt-1), MAX); delay = random in [0, cap].
+ * Reads BASE/MAX from env (CCFLARE_OVERLOAD_RETRY_BASE_MS /
+ * CCFLARE_OVERLOAD_RETRY_MAX_MS), falling back to TIME_CONSTANTS.
+ * Uses || (not ??) so 0/NaN env values fall through to the default.
+ *
+ * `rng` is injectable for deterministic tests; defaults to Math.random.
+ */
+export function computeOverloadRetryDelayMs(
+	attempt: number,
+	rng: () => number = Math.random,
+): number {
+	const n = Math.max(1, attempt);
+	const baseEnv = Number(process.env.CCFLARE_OVERLOAD_RETRY_BASE_MS);
+	const maxEnv = Number(process.env.CCFLARE_OVERLOAD_RETRY_MAX_MS);
+	const base = baseEnv || TIME_CONSTANTS.OVERLOAD_RETRY_BASE_MS;
+	const max = maxEnv || TIME_CONSTANTS.OVERLOAD_RETRY_MAX_MS;
+	const exponent = Math.min(n - 1, 52);
+	const cap = Math.min(base * 2 ** exponent, max);
+	return Math.floor(rng() * cap);
+}
 
 /**
  * Compute exponential-backoff cooldown (ms) for a given streak depth.

@@ -2,9 +2,12 @@
 export {
 	BUFFER_SIZES,
 	CACHE,
+	computeOverloadRetryDelayMs,
 	computeRateLimitBackoffMs,
+	getOverloadRetryMaxAttempts,
 	getRateLimitResetStabilityMs,
 	HTTP_STATUS,
+	isOverloadRetryEnabled,
 	LIMITS,
 	NETWORK,
 	TIME_CONSTANTS,

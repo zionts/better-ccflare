@@ -1,5 +1,15 @@
-import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
+import {
+	afterAll,
+	afterEach,
+	beforeAll,
+	beforeEach,
+	describe,
+	expect,
+	it,
+	mock,
+} from "bun:test";
 import type { Account, RequestMeta } from "@better-ccflare/types";
+import { initUsageCollector } from "../../usage-collector";
 import { isModelUnavailableError, proxyWithAccount } from "../proxy-operations";
 import type { ProxyContext } from "../proxy-types";
 
@@ -702,6 +712,157 @@ describe("proxyWithAccount — 529 failover", () => {
 			{ status: 529, headers: { "content-type": "application/json" } },
 		);
 		expect(await isModelUnavailableError(response)).toBe(false);
+	});
+});
+
+describe("proxyWithAccount — 529 in-place retry (issue #271)", () => {
+	let originalFetch: typeof globalThis.fetch;
+	const OVERLOAD_BODY =
+		'{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}';
+
+	// The 200-absorb test forwards a response, which needs the usage collector.
+	beforeAll(() => {
+		initUsageCollector(
+			() => false,
+			() => {},
+		);
+	});
+
+	beforeEach(() => {
+		originalFetch = globalThis.fetch;
+		// Keep retry sleeps effectively instant for the suite.
+		process.env.CCFLARE_OVERLOAD_RETRY_BASE_MS = "1";
+		process.env.CCFLARE_OVERLOAD_RETRY_MAX_MS = "1";
+		process.env.CCFLARE_OVERLOAD_RETRY_MAX_ATTEMPTS = "2";
+		delete process.env.CCFLARE_OVERLOAD_RETRY_ENABLED;
+	});
+
+	afterEach(() => {
+		globalThis.fetch = originalFetch;
+		delete process.env.CCFLARE_OVERLOAD_RETRY_BASE_MS;
+		delete process.env.CCFLARE_OVERLOAD_RETRY_MAX_MS;
+		delete process.env.CCFLARE_OVERLOAD_RETRY_MAX_ATTEMPTS;
+		delete process.env.CCFLARE_OVERLOAD_RETRY_ENABLED;
+	});
+
+	afterAll(() => {
+		globalThis.fetch = originalFetch;
+	});
+
+	function anthropicAccount() {
+		return makeAccount({
+			provider: "anthropic",
+			api_key: "test-key",
+			access_token: null,
+		});
+	}
+
+	// A reset-less 529 (no retry-after / reset headers) → the real Anthropic
+	// parseRateLimit reports isRateLimited:true, resetTime:undefined, which is
+	// exactly the path the in-place retry targets.
+	function resetLess529() {
+		return new Response(OVERLOAD_BODY, {
+			status: 529,
+			headers: { "content-type": "application/json" },
+		});
+	}
+
+	it("retries a reset-less 529 the configured number of times, then fails over", async () => {
+		const fetchMock = mock(async () => resetLess529());
+		globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
+
+		const bodyBuffer = makeRequestBody();
+		const result = await proxyWithAccount(
+			makeRequest(bodyBuffer),
+			new URL("https://proxy.local/v1/messages"),
+			anthropicAccount(),
+			makeRequestMeta(),
+			bodyBuffer,
+			() => undefined,
+			0,
+			makeProxyContext(),
+		);
+
+		// Failover (null) only AFTER exhausting retries: 1 initial + 2 retries.
+		expect(result).toBeNull();
+		expect(fetchMock.mock.calls.length).toBe(3);
+	});
+
+	it("does not retry a 529 that carries a reset header (authoritative cooldown)", async () => {
+		const fetchMock = mock(
+			async () =>
+				new Response(OVERLOAD_BODY, {
+					status: 529,
+					headers: { "content-type": "application/json", "retry-after": "30" },
+				}),
+		);
+		globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
+
+		const bodyBuffer = makeRequestBody();
+		const result = await proxyWithAccount(
+			makeRequest(bodyBuffer),
+			new URL("https://proxy.local/v1/messages"),
+			anthropicAccount(),
+			makeRequestMeta(),
+			bodyBuffer,
+			() => undefined,
+			0,
+			makeProxyContext(),
+		);
+
+		expect(result).toBeNull();
+		expect(fetchMock.mock.calls.length).toBe(1); // no retry
+	});
+
+	it("does not retry when CCFLARE_OVERLOAD_RETRY_ENABLED=false", async () => {
+		process.env.CCFLARE_OVERLOAD_RETRY_ENABLED = "false";
+		const fetchMock = mock(async () => resetLess529());
+		globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
+
+		const bodyBuffer = makeRequestBody();
+		const result = await proxyWithAccount(
+			makeRequest(bodyBuffer),
+			new URL("https://proxy.local/v1/messages"),
+			anthropicAccount(),
+			makeRequestMeta(),
+			bodyBuffer,
+			() => undefined,
+			0,
+			makeProxyContext(),
+		);
+
+		expect(result).toBeNull();
+		expect(fetchMock.mock.calls.length).toBe(1); // disabled → no retry
+	});
+
+	it("absorbs a reset-less 529 when a retry succeeds (returns 200, no failover)", async () => {
+		let n = 0;
+		const fetchMock = mock(async () => {
+			n++;
+			return n === 1
+				? resetLess529()
+				: new Response('{"ok":true}', {
+						status: 200,
+						headers: { "content-type": "application/json" },
+					});
+		});
+		globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
+
+		const bodyBuffer = makeRequestBody();
+		const result = await proxyWithAccount(
+			makeRequest(bodyBuffer),
+			new URL("https://proxy.local/v1/messages"),
+			anthropicAccount(),
+			makeRequestMeta(),
+			bodyBuffer,
+			() => undefined,
+			0,
+			makeProxyContext(),
+		);
+
+		expect(result).not.toBeNull();
+		expect(result?.status).toBe(200);
+		expect(fetchMock.mock.calls.length).toBe(2); // stopped retrying on success
 	});
 });
 
