@@ -1151,18 +1151,35 @@ export function createPoolExhaustedResponse(accounts: Account[]): Response {
 				)
 			: 60; // Default 60s if no cooldown info
 
+	// Map pool exhaustion to a CLIENT-RECOVERABLE status. Default 429
+	// (rate_limit_error): Claude Code / the Anthropic SDK treat 429 as a
+	// recoverable rate limit — they honor Retry-After, back off, and resume the
+	// turn — whereas a 503 surfaces as a fatal "server-side issue" that aborts
+	// the session. Override via CCFLARE_POOL_EXHAUSTED_STATUS (429 | 529 | 503).
+	const statusEnv = Number(process.env.CCFLARE_POOL_EXHAUSTED_STATUS);
+	const poolExhaustedStatus =
+		statusEnv === 429 || statusEnv === 529 || statusEnv === 503
+			? statusEnv
+			: 429;
+	const errorType =
+		poolExhaustedStatus === 429
+			? "rate_limit_error"
+			: poolExhaustedStatus === 529
+				? "overloaded_error"
+				: "pool_exhausted";
+
 	return new Response(
 		JSON.stringify({
 			type: "error",
 			error: {
-				type: "pool_exhausted",
+				type: errorType,
 				message: ERROR_MESSAGES.POOL_EXHAUSTED,
 				next_available_at: nextAvailableAt,
 				accounts: accountInfos,
 			},
 		}),
 		{
-			status: 503,
+			status: poolExhaustedStatus,
 			headers: {
 				"Content-Type": "application/json",
 				"Retry-After": String(retryAfterSeconds),

@@ -335,7 +335,7 @@ export async function handleProxy(
 				requestHeaders: Object.fromEntries(req.headers.entries()),
 				requestBody: null,
 				project: project ?? null,
-				responseStatus: 503,
+				responseStatus: poolExhaustedResponse.status,
 				responseHeaders: Object.fromEntries(
 					poolExhaustedResponse.headers.entries(),
 				),
