@@ -5,11 +5,13 @@ export {
 	computeOverloadRetryDelayMs,
 	computeRateLimitBackoffMs,
 	getOverloadRetryMaxAttempts,
+	getRateLimitMaxCooldownMs,
 	getRateLimitResetStabilityMs,
 	HTTP_STATUS,
 	isOverloadRetryEnabled,
 	LIMITS,
 	NETWORK,
+	resolveCooldownUntil,
 	TIME_CONSTANTS,
 } from "./constants";
 

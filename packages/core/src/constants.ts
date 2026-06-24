@@ -67,6 +67,13 @@ export const TIME_CONSTANTS = {
 	OVERLOAD_RETRY_BASE_MS: 750, // base for full-jitter backoff on the 1st retry
 	OVERLOAD_RETRY_MAX_MS: 3 * 1000, // 3s: ceiling for a single backoff sleep
 	OVERLOAD_RETRY_MAX_ATTEMPTS: 2, // extra attempts after the initial request
+
+	// Safety ceiling for an upstream-reset-driven cooldown. When a 429 ships a
+	// far-future reset (Anthropic 5h/weekly usage-window limits), we bench until
+	// that reset instead of re-probing every ~5min — but never longer than this,
+	// so a stale/oversized hint can't idle an account indefinitely.
+	// Override at runtime via CCFLARE_RATE_LIMIT_MAX_COOLDOWN_MS.
+	RATE_LIMIT_MAX_COOLDOWN_MS: 12 * 60 * 60 * 1000, // 12h
 } as const;
 
 /**
@@ -139,6 +146,41 @@ export function computeRateLimitBackoffMs(consecutiveCount: number): number {
 export function getRateLimitResetStabilityMs(): number {
 	const raw = Number(process.env.CCFLARE_RATE_LIMIT_RESET_STABILITY_MS);
 	return raw || TIME_CONSTANTS.RATE_LIMIT_RESET_STABILITY_MS;
+}
+
+/**
+ * Read the safety ceiling (ms) for an upstream-reset-driven cooldown.
+ * Reads CCFLARE_RATE_LIMIT_MAX_COOLDOWN_MS from env.
+ * Uses || (not ??) so 0/NaN env values fall through to the default.
+ */
+export function getRateLimitMaxCooldownMs(): number {
+	const raw = Number(process.env.CCFLARE_RATE_LIMIT_MAX_COOLDOWN_MS);
+	return raw || TIME_CONSTANTS.RATE_LIMIT_MAX_COOLDOWN_MS;
+}
+
+/**
+ * Resolve how long an account should be benched after a 429.
+ *
+ * - No upstream reset hint → use the exponential backoff (probe interval).
+ * - Upstream reset known → honor it, but bound it:
+ *     - BELOW by the exponential backoff (never bench shorter than the streak ramp), and
+ *     - ABOVE by `maxCooldownMs` (a far-future / stale hint can't idle the account
+ *       indefinitely — e.g. Anthropic 5h/weekly usage-window resets).
+ *
+ * Pure and unit-testable: callers pass a fixed `now`.
+ */
+export function resolveCooldownUntil(opts: {
+	now: number;
+	backoffMs: number;
+	maxCooldownMs: number;
+	resetTime?: number;
+}): number {
+	const candidateUntil = opts.now + opts.backoffMs;
+	if (!opts.resetTime) return candidateUntil;
+	return Math.min(
+		Math.max(opts.resetTime, candidateUntil),
+		opts.now + opts.maxCooldownMs,
+	);
 }
 
 // Buffer sizes (in bytes unless specified)
