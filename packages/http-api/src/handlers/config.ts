@@ -47,6 +47,9 @@ export function createConfigHandlers(
 					config.getUsageThrottlingFiveHourEnabled(),
 				usage_throttling_weekly_enabled:
 					config.getUsageThrottlingWeeklyEnabled(),
+				pace_enabled: config.getPaceEnabled(),
+				pace_floor_pct: config.getPaceFloorPct(),
+				pace_ceiling_pct: config.getPaceCeilingPct(),
 			};
 			return jsonResponse(response);
 		},

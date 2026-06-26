@@ -17,6 +17,9 @@ function makeConfig() {
 		getUsageThrottlingWeeklyEnabled: () => true,
 		setUsageThrottlingFiveHourEnabled: mock(() => {}),
 		setUsageThrottlingWeeklyEnabled: mock(() => {}),
+		getPaceEnabled: () => false,
+		getPaceFloorPct: () => 55,
+		getPaceCeilingPct: () => 92,
 		getStrategy: () => "session",
 		setStrategy: mock(() => {}),
 		getDefaultAgentModel: () => "sonnet",
@@ -45,6 +48,9 @@ describe("createConfigHandlers", () => {
 
 		expect(body.usage_throttling_five_hour_enabled).toBe(true);
 		expect(body.usage_throttling_weekly_enabled).toBe(true);
+		expect(body.pace_enabled).toBe(false);
+		expect(body.pace_floor_pct).toBe(55);
+		expect(body.pace_ceiling_pct).toBe(92);
 	});
 
 	it("updates usage throttling windows from POST body", async () => {

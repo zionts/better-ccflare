@@ -61,6 +61,9 @@ export interface ConfigData {
 	system_prompt_cache_ttl_1h?: boolean;
 	usage_throttling_five_hour_enabled?: boolean;
 	usage_throttling_weekly_enabled?: boolean;
+	pace_enabled?: boolean;
+	pace_floor_pct?: number;
+	pace_ceiling_pct?: number;
 	health_detail_enabled?: boolean;
 	alert_daily_spend_usd?: number;
 	alert_tokens_per_hour?: number;
@@ -417,6 +420,53 @@ export class Config extends EventEmitter {
 		this.set("usage_throttling_weekly_enabled", value);
 	}
 
+	// --- Pace-aware ranking (session-affinity) -----------------------------
+	// Disabled by default: turning it on changes routing, so it is opt-in via
+	// the PACE_ENABLED env var or the pace_enabled config key. Floor/ceiling are
+	// 0–100 utilization percentages; see packages/load-balancer/src/pace.ts.
+
+	getPaceEnabled(): boolean {
+		const fromEnv = parseEnabledEnvFlag(process.env.PACE_ENABLED);
+		if (fromEnv !== undefined) return fromEnv;
+		const fromFile = this.data.pace_enabled;
+		if (typeof fromFile === "boolean") return fromFile;
+		return false;
+	}
+
+	setPaceEnabled(value: boolean): void {
+		this.set("pace_enabled", value);
+	}
+
+	getPaceFloorPct(): number {
+		const fromEnv = process.env.PACE_FLOOR_PCT;
+		if (fromEnv) {
+			const n = parseInt(fromEnv, 10);
+			if (!Number.isNaN(n)) return this.clamp(n, 0, 100);
+		}
+		const fromFile = this.data.pace_floor_pct;
+		if (typeof fromFile === "number") return this.clamp(fromFile, 0, 100);
+		return 55; // below 55% an account is never pace-penalized
+	}
+
+	setPaceFloorPct(value: number): void {
+		this.set("pace_floor_pct", this.clamp(value, 0, 100));
+	}
+
+	getPaceCeilingPct(): number {
+		const fromEnv = process.env.PACE_CEILING_PCT;
+		if (fromEnv) {
+			const n = parseInt(fromEnv, 10);
+			if (!Number.isNaN(n)) return this.clamp(n, 0, 100);
+		}
+		const fromFile = this.data.pace_ceiling_pct;
+		if (typeof fromFile === "number") return this.clamp(fromFile, 0, 100);
+		return 92; // at/above 92% an account becomes last-resort
+	}
+
+	setPaceCeilingPct(value: number): void {
+		this.set("pace_ceiling_pct", this.clamp(value, 0, 100));
+	}
+
 	getHealthDetailEnabled(): boolean {
 		const fromEnv = parseEnabledEnvFlag(process.env.HEALTH_DETAIL_ENABLED);
 		if (fromEnv !== undefined) {
@@ -564,6 +614,9 @@ export class Config extends EventEmitter {
 			usage_throttling_five_hour_enabled:
 				this.getUsageThrottlingFiveHourEnabled(),
 			usage_throttling_weekly_enabled: this.getUsageThrottlingWeeklyEnabled(),
+			pace_enabled: this.getPaceEnabled(),
+			pace_floor_pct: this.getPaceFloorPct(),
+			pace_ceiling_pct: this.getPaceCeilingPct(),
 			health_detail_enabled: this.getHealthDetailEnabled(),
 			alert_daily_spend_usd: this.getAlertDailySpendUsd(),
 			alert_tokens_per_hour: this.getAlertTokensPerHour(),

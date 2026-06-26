@@ -24,6 +24,7 @@ import {
 import { AlertService, APIRouter, AuthService } from "@better-ccflare/http-api";
 import {
 	LeastUsedStrategy,
+	type PaceOptions,
 	SessionAffinityStrategy,
 	SessionStrategy,
 } from "@better-ccflare/load-balancer";
@@ -64,6 +65,7 @@ import {
 	type LoadBalancingStrategy,
 	StrategyName,
 	type StrategyStore,
+	type UsageWindowSnapshot,
 } from "@better-ccflare/types";
 import { serve } from "bun";
 
@@ -74,15 +76,55 @@ import { serve } from "bun";
 function buildStrategy(
 	name: StrategyName,
 	sessionDurationMs: number,
+	pace: PaceOptions,
 ): LoadBalancingStrategy {
 	switch (name) {
 		case StrategyName.LeastUsed:
 			return new LeastUsedStrategy();
 		case StrategyName.SessionAffinity:
-			return new SessionAffinityStrategy(sessionDurationMs);
+			return new SessionAffinityStrategy(sessionDurationMs, pace);
 		default:
 			return new SessionStrategy(sessionDurationMs);
 	}
+}
+
+/** Build pace-aware ranking options from the live config. */
+function paceFromConfig(config: Config): PaceOptions {
+	return {
+		enabled: config.getPaceEnabled(),
+		floorPct: config.getPaceFloorPct(),
+		ceilingPct: config.getPaceCeilingPct(),
+	};
+}
+
+/**
+ * Normalize cached Anthropic usage data into per-window snapshots for
+ * pace-aware ranking. Only the fixed-length Anthropic windows are emitted;
+ * windows lacking a numeric utilization or a parseable reset time are skipped.
+ * Non-Anthropic usage shapes simply yield no windows (pace ranking ignores
+ * them — they fall back to plain least-used).
+ */
+function extractUsageWindows(data: unknown): UsageWindowSnapshot[] {
+	if (!data || typeof data !== "object") return [];
+	const windows: UsageWindowSnapshot[] = [];
+	const keys = [
+		"five_hour",
+		"seven_day",
+		"seven_day_opus",
+		"seven_day_sonnet",
+	] as const;
+	const record = data as Record<
+		string,
+		{ utilization?: number | null; resets_at?: string | null } | undefined
+	>;
+	for (const window of keys) {
+		const w = record[window];
+		if (!w || typeof w.utilization !== "number" || !w.resets_at) continue;
+		const resetAtMs = new Date(w.resets_at).getTime();
+		if (!Number.isFinite(resetAtMs)) continue;
+		windows.push({ window, utilization: w.utilization, resetAtMs });
+	}
+	return windows;
 }
 
 // Import embedded dashboard assets (will be bundled in compiled binary)
@@ -845,6 +887,7 @@ export default async function startServer(options?: {
 	const strategy = buildStrategy(
 		config.getStrategy(),
 		runtimeConfig.sessionDurationMs,
+		paceFromConfig(config),
 	);
 	log.info(`Load-balancing strategy: ${config.getStrategy()}`);
 
@@ -853,6 +896,9 @@ export default async function startServer(options?: {
 			const data = usageCache.get(accountId);
 			if (!data) return null;
 			return getRepresentativeUtilizationForProvider(data, provider);
+		},
+		getAccountUsageWindows(accountId: string): UsageWindowSnapshot[] {
+			return extractUsageWindows(usageCache.get(accountId));
 		},
 	});
 
@@ -1038,12 +1084,22 @@ export default async function startServer(options?: {
 
 	// Hot reload strategy configuration
 	config.on("change", ({ key }: { key: string }) => {
-		if (key === "lb_strategy") {
+		// Rebuild the strategy when the strategy itself OR any pace-ranking knob
+		// changes, so pace tuning takes effect without a restart.
+		if (
+			key === "lb_strategy" ||
+			key === "pace_enabled" ||
+			key === "pace_floor_pct" ||
+			key === "pace_ceiling_pct"
+		) {
 			const newStrategyName = config.getStrategy();
-			log.info(`Strategy configuration changed to: ${newStrategyName}`);
+			log.info(
+				`Rebuilding load-balancing strategy (${newStrategyName}) after ${key} change`,
+			);
 			const strategy = buildStrategy(
 				newStrategyName,
 				runtimeConfig.sessionDurationMs,
+				paceFromConfig(config),
 			);
 			strategy.initialize?.(strategyStore);
 			proxyContext.strategy = strategy;

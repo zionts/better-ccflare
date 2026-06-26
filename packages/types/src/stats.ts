@@ -243,6 +243,9 @@ export interface ConfigResponse {
 	system_prompt_cache_ttl_1h: boolean;
 	usage_throttling_five_hour_enabled: boolean;
 	usage_throttling_weekly_enabled: boolean;
+	pace_enabled: boolean;
+	pace_floor_pct: number;
+	pace_ceiling_pct: number;
 }
 
 export interface StrategyUpdateRequest {

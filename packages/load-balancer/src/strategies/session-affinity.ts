@@ -6,7 +6,15 @@ import type {
 	RequestMeta,
 	StrategyStore,
 } from "@better-ccflare/types";
+import { isAtCeiling, type PaceOptions, pacePenalty } from "../pace";
 import { isPeekAvailable, wouldAutoUnpause } from "./peek-availability";
+
+/** Pace ranking disabled — the behaviour-preserving default. */
+const PACE_DISABLED: PaceOptions = {
+	enabled: false,
+	floorPct: 0,
+	ceilingPct: 100,
+};
 
 /**
  * Window during which a freshly-picked account is deprioritized so that
@@ -60,17 +68,49 @@ const RECENT_PICK_PENALTY = 100;
  */
 export class SessionAffinityStrategy implements LoadBalancingStrategy {
 	private affinityTtlMs: number;
+	private pace: PaceOptions;
 	private store: StrategyStore | null = null;
 	private log = new Logger("SessionAffinityStrategy");
 	/** clientId → which account it is stuck to (and when it was last touched). */
-	private affinity = new Map<string, { accountId: string; assignedAt: number }>();
+	private affinity = new Map<
+		string,
+		{ accountId: string; assignedAt: number }
+	>();
 	/** accountId → last time it was freshly assigned to a NEW client-session. */
 	private lastPickedAt = new Map<string, number>();
 
 	constructor(
 		affinityTtlMs: number = TIME_CONSTANTS.ANTHROPIC_SESSION_DURATION_DEFAULT,
+		pace: PaceOptions = PACE_DISABLED,
 	) {
 		this.affinityTtlMs = affinityTtlMs;
+		this.pace = pace;
+	}
+
+	/** Pace penalty for an account from its usage windows; 0 when pace is off. */
+	private pacePenaltyFor(accountId: string, now: number): number {
+		if (!this.pace.enabled) return 0;
+		const windows = this.store?.getAccountUsageWindows?.(accountId) ?? [];
+		return pacePenalty(windows, now, this.pace);
+	}
+
+	/** Whether `account` is at the hard ceiling per its usage windows. */
+	private atCeiling(account: Account): boolean {
+		if (!this.pace.enabled) return false;
+		const windows = this.store?.getAccountUsageWindows?.(account.id) ?? [];
+		return isAtCeiling(windows, this.pace);
+	}
+
+	/**
+	 * Evict a sticky mapping only when the mapped account is at the ceiling AND a
+	 * non-ceiling alternative exists. If every available account is at the ceiling
+	 * there is nowhere better to go, so we keep the client on its sticky account
+	 * (preserve cache locality; never thrash) — and it is still served, so the
+	 * pool is never starved.
+	 */
+	private isMappedOverCeiling(mapped: Account, available: Account[]): boolean {
+		if (!this.atCeiling(mapped)) return false;
+		return available.some((a) => a.id !== mapped.id && !this.atCeiling(a));
 	}
 
 	initialize(store: StrategyStore): void {
@@ -89,7 +129,12 @@ export class SessionAffinityStrategy implements LoadBalancingStrategy {
 			const lastPick = this.lastPickedAt.get(a.id) ?? 0;
 			const recencyPenalty =
 				now - lastPick < RECENT_PICK_WINDOW_MS ? RECENT_PICK_PENALTY : 0;
-			return { account: a, score: util + recencyPenalty };
+			// Pace penalty deprioritizes accounts burning ahead of their window
+			// pace (and makes at-ceiling accounts last-resort). It only reorders —
+			// every account stays in the returned list, so the pool is never
+			// starved by pace logic.
+			const pace = this.pacePenaltyFor(a.id, now);
+			return { account: a, score: util + recencyPenalty + pace };
 		});
 
 		return scored
@@ -139,6 +184,17 @@ export class SessionAffinityStrategy implements LoadBalancingStrategy {
 			const mapping = this.affinity.get(clientId);
 			if (mapping) {
 				const mapped = available.find((a) => a.id === mapping.accountId);
+				if (mapped && this.isMappedOverCeiling(mapped, available)) {
+					// Sticky account has crossed the hard ceiling. Evict it from the
+					// pin and fail over to the least-used account — but do NOT delete
+					// the mapping: when the window resets and it drops back under the
+					// ceiling, the client snaps back to it (cache locality), mirroring
+					// the rate-limit failover below (issue #115).
+					this.log.info(
+						`Client ${clientId} pinned account ${mapped.name} is at usage ceiling — temporary failover (snap back on reset)`,
+					);
+					return this.rankByLeastUsed(available, now);
+				}
 				if (mapped) {
 					// STICKY hit: keep the client on its account (prompt-cache reuse).
 					// Refresh assignedAt so an active session keeps its mapping alive.
